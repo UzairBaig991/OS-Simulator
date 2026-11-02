@@ -111,20 +111,43 @@
 
         <section class="panel scheduler-panel" id="scheduler">
             <div class="section-heading">
-                <div><p class="eyebrow">INTERACTIVE WORKBENCH</p><h2>Scheduling simulator</h2><p class="section-description">Explore how different CPU scheduling strategies handle the same workload.</p></div>
-                <span class="lab-badge">SAMPLE WORKLOAD · 4 PROCESSES</span>
+                <div><p class="eyebrow">INTERACTIVE WORKBENCH</p><h2>Scheduling simulator</h2><p class="section-description">Build your own workload and compare how CPU scheduling strategies handle it.</p></div>
+                <span class="lab-badge" id="workloadBadge">4 PROCESSES</span>
             </div>
+            <details class="workload-editor" open>
+                <summary>
+                    <span><strong>Workload designer</strong><small>Set arrival, CPU burst, and priority for each process.</small></span>
+                    <span class="editor-hint">MAX 12 PROCESSES <i></i></span>
+                </summary>
+                <div class="workload-toolbar">
+                    <span id="workloadStatus" class="workload-status" aria-live="polite">Sample workload ready</span>
+                    <div class="workload-actions">
+                        <button id="restoreWorkload" class="button button-secondary" type="button">Load sample</button>
+                        <button id="saveWorkload" class="button button-secondary" type="button">Save workload</button>
+                        <button id="addProcess" class="button button-secondary" type="button"><span aria-hidden="true">+</span> Add process</button>
+                    </div>
+                </div>
+                <div class="table-wrap workload-table-wrap">
+                    <table class="workload-table">
+                        <thead><tr><th scope="col">PROCESS NAME</th><th scope="col">ARRIVAL</th><th scope="col">CPU BURST</th><th scope="col">PRIORITY</th><th scope="col"><span class="sr-only">Remove process</span></th></tr></thead>
+                        <tbody id="workloadTable"></tbody>
+                    </table>
+                </div>
+                <p class="workload-help">Arrival and burst use time units. Lower priority numbers run first. Maximum total burst: 500 units. Workloads are saved in this browser only.</p>
+            </details>
             <div class="controls">
                 <label>Scheduling algorithm
                     <select id="algorithm">
                         <option value="FCFS">First come, first served</option>
-                        <option value="SJF">Shortest job first</option>
-                        <option value="Priority">Priority scheduling</option>
+                        <option value="SJF">Shortest job first · non-preemptive</option>
+                        <option value="SRTF">Shortest remaining time · preemptive</option>
+                        <option value="Priority">Priority scheduling · non-preemptive</option>
+                        <option value="Priority Preemptive">Priority scheduling · preemptive</option>
                         <option value="Aging">Priority with aging</option>
                         <option value="Round Robin">Round Robin</option>
                     </select>
                 </label>
-                <label id="quantumControl">Time quantum
+                <label>Round Robin quantum
                     <span class="input-with-suffix"><input id="quantum" type="number" min="1" max="10000" value="100"><span>ms</span></span>
                 </label>
                 <div class="control-actions">
@@ -133,7 +156,7 @@
                 </div>
             </div>
             <div id="simulationResult" class="simulation-result" aria-live="polite">
-                <div class="empty-state"><span class="empty-icon">⌁</span><strong>Ready when you are</strong><span>Run a simulation to see its schedule and performance.</span></div>
+                <div class="empty-state"><span class="empty-icon">⌁</span><strong>Ready when you are</strong><span>Design a workload, then run or compare its schedules.</span></div>
             </div>
         </section>
 
