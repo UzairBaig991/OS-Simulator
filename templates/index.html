@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#080d19">
+    <meta name="description" content="Monitor system resources and explore operating system scheduling algorithms.">
+    <title>Orbit · OS Resource Simulator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<div class="app-shell">
+    <aside class="sidebar">
+        <a class="brand" href="#dashboard" aria-label="Orbit dashboard">
+            <span class="brand-mark">O</span>
+            <span><strong>orbit</strong><small>OS RESOURCE LAB</small></span>
+        </a>
+        <p class="nav-label">WORKSPACE</p>
+        <nav aria-label="Main navigation">
+            <a class="nav-link active" href="#dashboard"><span class="nav-icon">⌂</span> Overview</a>
+            <a class="nav-link" href="#resources"><span class="nav-icon">◉</span> Resources</a>
+            <a class="nav-link" href="#processes"><span class="nav-icon">▤</span> Processes</a>
+            <a class="nav-link" href="#scheduler"><span class="nav-icon">↗</span> Scheduler lab</a>
+            <a class="nav-link" href="#starvation"><span class="nav-icon">✳</span> Starvation guard</a>
+        </nav>
+        <div class="sidebar-note">
+            <span class="status-pulse"></span>
+            <div><strong>Local monitor</strong><small>Connected to this machine</small></div>
+        </div>
+        <p class="sidebar-footer">A clearer view of your system.</p>
+    </aside>
+
+    <main id="dashboard" class="main-content">
+        <header class="topbar">
+            <div class="breadcrumb">WORKSPACE <span>/</span> OVERVIEW</div>
+            <div class="topbar-right">
+                <span id="lastUpdated" class="last-updated">Waiting for first reading</span>
+                <span id="systemStatus" class="system-status"><i></i> Connecting</span>
+            </div>
+        </header>
+
+        <section class="page-heading">
+            <div>
+                <p class="eyebrow">SYSTEM OVERVIEW</p>
+                <h1>Your system, <span>in focus.</span></h1>
+                <p class="intro">A live view of resource usage, active processes, and scheduling behavior.</p>
+            </div>
+            <button id="refreshButton" class="button button-secondary" type="button">
+                <span aria-hidden="true">↻</span> Refresh data
+            </button>
+        </section>
+
+        <section class="metrics" aria-label="System summary">
+            <article class="metric-card metric-cpu">
+                <div class="metric-top"><span class="metric-label">CPU utilization</span><span class="metric-icon">⌁</span></div>
+                <div class="metric-value"><strong id="cpu">--</strong><span>%</span></div>
+                <div class="meter"><span id="cpuBar"></span></div>
+                <p id="cpuDetail" class="metric-caption">Live processor load</p>
+            </article>
+            <article class="metric-card metric-memory">
+                <div class="metric-top"><span class="metric-label">Memory usage</span><span class="metric-icon">▦</span></div>
+                <div class="metric-value"><strong id="memory">--</strong><span>%</span></div>
+                <div class="meter"><span id="memoryBar"></span></div>
+                <p id="memoryDetail" class="metric-caption">Waiting for memory data</p>
+            </article>
+            <article class="metric-card metric-process">
+                <div class="metric-top"><span class="metric-label">Active processes</span><span class="metric-icon">▤</span></div>
+                <div class="metric-value"><strong id="processCount">--</strong></div>
+                <div class="metric-inline"><span class="live-dot"></span> Running on this system</div>
+                <p class="metric-caption">Process count from the OS</p>
+            </article>
+            <article class="metric-card metric-uptime">
+                <div class="metric-top"><span class="metric-label">System uptime</span><span class="metric-icon">◷</span></div>
+                <div class="metric-value"><strong id="uptime">--</strong></div>
+                <div class="metric-inline">Since the last system boot</div>
+                <p class="metric-caption">Updated with each reading</p>
+            </article>
+        </section>
+
+        <section class="panel chart-panel" id="resources">
+            <div class="section-heading">
+                <div><p class="eyebrow">LIVE TELEMETRY</p><h2>Resource activity</h2></div>
+                <div class="chart-legend"><span><i class="legend-cpu"></i> CPU</span><span><i class="legend-memory"></i> Memory</span><span class="chart-window">Last minute</span></div>
+            </div>
+            <div class="chart-wrap">
+                <canvas id="resourceChart" aria-label="CPU and memory utilization over the last minute" role="img"></canvas>
+                <div id="chartEmpty" class="chart-empty">Collecting resource readings…</div>
+            </div>
+        </section>
+
+        <section class="panel process-panel" id="processes">
+            <div class="section-heading process-heading">
+                <div><p class="eyebrow">PROCESS MANAGER</p><h2>Top memory consumers</h2><p class="section-description">The 10 processes using the most memory right now.</p></div>
+                <div class="process-tools">
+                    <label class="search-box"><span aria-hidden="true">⌕</span><input id="processSearch" type="search" placeholder="Find a process" aria-label="Find a process"></label>
+                    <label class="select-label" for="processSort">Sort
+                        <select id="processSort" aria-label="Sort processes">
+                            <option value="memory">Memory</option><option value="name">Name</option><option value="pid">PID</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th scope="col">PROCESS</th><th scope="col">PID</th><th scope="col">MEMORY</th><th scope="col">STATUS</th></tr></thead>
+                    <tbody id="processTable"><tr><td colspan="4" class="table-message">Loading processes…</td></tr></tbody>
+                </table>
+            </div>
+            <div class="table-footer"><span id="processSummary">Refreshing automatically</span><span>Auto-refresh · 10 sec</span></div>
+        </section>
+
+        <section class="panel scheduler-panel" id="scheduler">
+            <div class="section-heading">
+                <div><p class="eyebrow">INTERACTIVE WORKBENCH</p><h2>Scheduling simulator</h2><p class="section-description">Explore how different CPU scheduling strategies handle the same workload.</p></div>
+                <span class="lab-badge">SAMPLE WORKLOAD · 4 PROCESSES</span>
+            </div>
+            <div class="controls">
+                <label>Scheduling algorithm
+                    <select id="algorithm">
+                        <option value="FCFS">First come, first served</option>
+                        <option value="SJF">Shortest job first</option>
+                        <option value="Priority">Priority scheduling</option>
+                        <option value="Aging">Priority with aging</option>
+                        <option value="Round Robin">Round Robin</option>
+                    </select>
+                </label>
+                <label id="quantumControl">Time quantum
+                    <span class="input-with-suffix"><input id="quantum" type="number" min="1" max="10000" value="100"><span>ms</span></span>
+                </label>
+                <div class="control-actions">
+                    <button id="runSimulation" class="button button-primary" type="button">Run simulation <span aria-hidden="true">→</span></button>
+                    <button id="compareSimulation" class="button button-secondary" type="button">Compare all</button>
+                </div>
+            </div>
+            <div id="simulationResult" class="simulation-result" aria-live="polite">
+                <div class="empty-state"><span class="empty-icon">⌁</span><strong>Ready when you are</strong><span>Run a simulation to see its schedule and performance.</span></div>
+            </div>
+        </section>
+
+        <section class="panel aging-panel" id="starvation">
+            <div class="aging-symbol">✳</div>
+            <div class="aging-copy">
+                <p class="eyebrow">FAIRNESS MECHANISM</p>
+                <h2>Keep every process moving.</h2>
+                <p class="section-description">Priority scheduling can leave low-priority jobs waiting. Aging gradually boosts a job's effective priority while it waits, giving it a fair chance at the CPU.</p>
+                <div class="aging-facts"><span><i></i> Priority improves every {{ aging_interval }} waiting units</span><span>Lower priority number = higher priority</span></div>
+            </div>
+            <a class="button button-secondary aging-link" href="#scheduler">Try priority with aging <span aria-hidden="true">↗</span></a>
+        </section>
+
+        <footer><span class="footer-brand">orbit</span> OS Resource Simulator <span>·</span> Monitor thoughtfully.</footer>
+    </main>
+</div>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
