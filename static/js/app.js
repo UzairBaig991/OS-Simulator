@@ -511,8 +511,9 @@ function scheduleMonitor() {
 
 const viewLabels = {
     dashboard: "Dashboard", processes: "Process Manager", resources: "Resource Monitor",
-    cpu: "CPU Scheduling", memory: "Memory Manager", disk: "Disk Scheduling",
-    deadlock: "Deadlock & Safety", starvation: "Starvation Prevention", system: "System Info"
+    cpu: "CPU Scheduling", memory: "Memory Manager", partitions: "Partition Allocator", disk: "Disk Scheduling",
+    deadlock: "Deadlock & Safety", sync: "Synchronization", files: "File Allocation",
+    starvation: "Starvation Prevention", system: "System Info"
 };
 const viewDescriptions = {
     processes: "Inspect live CPU, memory, thread count, and process state.",
@@ -527,8 +528,9 @@ function switchView(view, updateHistory = false) {
     const visiblePages = {
         dashboard: ["dashboard", "resources", "processes"],
         processes: ["processes"], resources: ["resources"],
-        cpu: ["cpu"], memory: ["memory"], disk: ["disk"],
-        deadlock: ["deadlock"], starvation: ["starvation"], system: ["system"]
+        cpu: ["cpu"], memory: ["memory"], partitions: ["partitions"], disk: ["disk"],
+        deadlock: ["deadlock"], sync: ["sync"], files: ["files"],
+        starvation: ["starvation"], system: ["system"]
     }[view];
     document.querySelectorAll("[data-view-page]").forEach(element => {
         element.hidden = !visiblePages.includes(element.dataset.viewPage);
@@ -605,6 +607,58 @@ async function submitMemory(compare = false) {
     } catch (error) { $("memoryResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; }
 }
 
+function parsePartitionProcesses(value) {
+    const items = value.split(",").map(item => item.trim());
+    if (!items.length || items.length > 32) throw new Error("Enter between 1 and 32 processes.");
+    return items.map((item, index) => {
+        const split = item.lastIndexOf(":");
+        if (split < 1 || !/^\d+$/.test(item.slice(split + 1).trim())) throw new Error(`Process ${index + 1} must use name:size format.`);
+        return { name: item.slice(0, split).trim(), size: Number(item.slice(split + 1).trim()) };
+    });
+}
+
+async function runPartitionPolicy(algorithm, partitions, processes) {
+    return fetchJSON("/api/memory/partitions", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ algorithm, partitions, processes })
+    });
+}
+
+function renderPartitionMap(data) {
+    const segments = data.layout.map((partition, index) => {
+        const used = Boolean(partition.process);
+        const ratio = used ? partition.process_size / partition.size * 100 : 0;
+        const title = used
+            ? `Partition ${partition.partition}: ${partition.process}, ${partition.process_size} of ${partition.size} KB; ${partition.internal_fragmentation} KB internal fragmentation`
+            : `Partition ${partition.partition}: ${partition.size} KB free`;
+        return `<div class="memory-segment ${used ? `memory-segment-${index % 6}` : "memory-segment-free"}" style="flex:${partition.size} 1 0%" title="${escapeHTML(title)}"><span class="memory-segment-fill" style="width:${ratio}%"></span><strong>${escapeHTML(partition.process || `Free ${partition.size}K`)}</strong><small>${partition.size} KB${used ? ` · ${partition.internal_fragmentation} waste` : " free"}</small></div>`;
+    }).join("");
+    const rows = data.placements.map(item => `<tr><td>${escapeHTML(item.name)}</td><td>${item.size} KB</td><td>${item.partition === null ? "—" : `Partition ${item.partition + 1}`}</td><td>${item.allocated ? `${item.internal_fragmentation} KB` : "—"}</td><td><span class="status-tag ${item.allocated ? "running" : "waiting"}">${item.allocated ? "Allocated" : "Waiting"}</span></td></tr>`).join("");
+    return `<div class="partition-map">${segments}</div><div class="partition-legend"><span><i class="allocated-legend"></i>Allocated memory</span><span><i class="free-legend"></i>Free partition</span></div><div class="table-wrap"><table class="module-data-table"><thead><tr><th>PROCESS</th><th>REQUEST</th><th>PLACEMENT</th><th>INTERNAL WASTE</th><th>STATUS</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+async function submitPartitionAllocation(compare = false) {
+    let partitions, processes;
+    try {
+        partitions = parseIntegerList($("partitionSizes").value, "Partition sizes", 32);
+        if (partitions.some(size => size < 1) || partitions.reduce((sum, size) => sum + size, 0) > 1000000) throw new Error("Partition sizes must be positive and total at most 1,000,000 KB.");
+        processes = parsePartitionProcesses($("partitionProcesses").value);
+    } catch (error) { $("partitionResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; return; }
+    const algorithms = compare ? ["First Fit", "Best Fit", "Worst Fit", "Next Fit"] : [$("partitionAlgorithm").value];
+    try {
+        const results = await Promise.all(algorithms.map(algorithm => runPartitionPolicy(algorithm, partitions, processes)));
+        if (!compare) {
+            const data = results[0];
+            $("partitionResult").innerHTML = `<div class="module-result-head"><strong>${data.algorithm}</strong><span>${data.allocated_processes}/${data.placements.length} processes · ${data.internal_fragmentation} KB internal waste${data.external_fragmentation ? " · external fragmentation" : ""}</span></div>${renderPartitionMap(data)}`;
+        } else {
+            const best = Math.max(...results.map(item => item.allocated_processes));
+            const cards = results.map(data => `<article class="partition-compare-card"><div class="module-result-head"><strong>${data.algorithm}${data.allocated_processes === best ? " · Most allocated" : ""}</strong><span>${data.allocated_processes}/${data.placements.length} placed · ${data.internal_fragmentation} KB waste</span></div>${renderPartitionMap(data)}</article>`).join("");
+            $("partitionResult").innerHTML = `<div class="partition-comparison">${cards}</div>`;
+        }
+        appendLog(`Memory partition allocation completed${compare ? " for all fit strategies" : ` with ${algorithms[0]}`}.`, "success");
+    } catch (error) { $("partitionResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; }
+}
+
 async function runDiskPolicy(algorithm, requests, head, maxCylinder, direction) {
     return fetchJSON("/api/disk/simulate", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -656,6 +710,85 @@ async function submitBanker() {
         $("bankerResult").innerHTML = `<div class="safety-result ${data.safe ? "safe" : "unsafe"}"><span class="safety-mark">${data.safe ? "✓" : "!"}</span><div><strong>${data.safe ? "Safe state" : "Unsafe state"}</strong><p>${escapeHTML(sequence)}</p></div></div><div class="table-wrap"><table class="module-data-table"><thead><tr><th>PROCESS</th>${available.map((_, index) => `<th>NEED R${index + 1}</th>`).join("")}</tr></thead><tbody>${data.need.map((row, index) => `<tr><td>P${index}</td>${row.map(value => `<td>${value}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
         appendLog(`Banker's algorithm reports an ${data.safe ? "available safe state" : "unsafe resource state"}.`, data.safe ? "success" : "warning");
     } catch (error) { $("bankerResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; }
+}
+
+async function submitSynchronization() {
+    let capacity = Number($("bufferCapacity").value);
+    const operations = $("syncOperations").value.split(",").map(item => item.trim().toUpperCase());
+    if (!Number.isInteger(capacity) || capacity < 1 || capacity > 20 || !operations.length || operations.length > 40 || operations.some(item => !["P", "C"].includes(item))) {
+        $("syncResult").innerHTML = "<p class='module-error'>Capacity must be 1–20. Enter up to 40 comma-separated P and C operations.</p>";
+        return;
+    }
+    try {
+        const data = await fetchJSON("/api/sync/bounded-buffer", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ capacity, operations })
+        });
+        const steps = data.trace.map(step => `<div class="sync-step"><span class="sync-step-number">${step.step}</span><span class="sync-task ${step.task.startsWith("Producer") ? "producer" : "consumer"}">${escapeHTML(step.task)}</span><strong>${escapeHTML(step.event)}</strong><span class="sync-semaphores">empty ${step.empty} · full ${step.full} · mutex ${step.mutex}</span><span class="sync-buffer">${step.buffer.map(item => `<i>${escapeHTML(item.replace("Item ", "#"))}</i>`).join("") || "empty buffer"}</span></div>`).join("");
+        $("syncResult").innerHTML = `<div class="module-result-head"><strong>Semaphore execution trace</strong><span>${operations.length - data.blocked.length}/${operations.length} operations completed · ${data.blocked.length} waiting</span></div><div class="sync-summary"><span>empty <strong>${data.empty}</strong></span><span>full <strong>${data.full}</strong></span><span>mutex <strong>1 · unlocked</strong></span><span>capacity <strong>${data.capacity}</strong></span></div><div class="sync-trace">${steps}</div>${data.blocked.length ? `<p class="module-error">Waiting at end of trace: ${data.blocked.map(escapeHTML).join(", ")}. Add the opposite operation to release them.</p>` : ""}`;
+        appendLog("Producer/consumer semaphore trace completed.", "success");
+    } catch (error) { $("syncResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; }
+}
+
+function parseFileRequests(value) {
+    const entries = value.split(",").map(item => item.trim());
+    if (!entries.length || entries.length > 25) throw new Error("Enter between 1 and 25 files.");
+    return entries.map((entry, index) => {
+        const separator = entry.lastIndexOf(":");
+        if (separator < 1 || !/^\d+$/.test(entry.slice(separator + 1).trim())) throw new Error(`File ${index + 1} must use name:size format.`);
+        return { name: entry.slice(0, separator).trim(), blocks: Number(entry.slice(separator + 1).trim()) };
+    });
+}
+
+async function runFilePolicy(algorithm, files, block_count, reserved) {
+    return fetchJSON("/api/files/allocation", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ algorithm, files, block_count, reserved })
+    });
+}
+
+function renderFileMap(data) {
+    const owner = new Map();
+    data.files.forEach((file, index) => {
+        file.blocks.forEach(block => owner.set(block, { file, index, indexed: false }));
+        if (file.index_block !== null) owner.set(file.index_block, { file, index, indexed: true });
+    });
+    const reservedBlocks = new Set(data.reserved);
+    const blocks = Array.from({ length: data.block_count }, (_, block) => {
+        const allocation = owner.get(block);
+        const isReserved = reservedBlocks.has(block);
+        const className = allocation ? `file-${allocation.index % 6}${allocation.indexed ? " index-block" : ""}` : isReserved ? "reserved-block" : "free-block";
+        const label = allocation ? (allocation.indexed ? "IDX" : allocation.file.name.slice(0, 3)) : isReserved ? "RSV" : "";
+        const title = allocation ? `${allocation.file.name}${allocation.indexed ? " · index block" : ""} · block ${block}` : isReserved ? `Reserved · block ${block}` : `Free · block ${block}`;
+        return `<span class="file-block ${className}" title="${escapeHTML(title)}">${escapeHTML(label)}</span>`;
+    }).join("");
+    const rows = data.files.map(file => `<tr><td>${escapeHTML(file.name)}</td><td>${file.requested}</td><td>${file.allocated ? file.blocks.join(", ") : "—"}</td><td>${file.index_block === null ? "—" : file.index_block}</td><td><span class="status-tag ${file.allocated ? "running" : "waiting"}">${file.allocated ? "Allocated" : file.fragmented ? "Fragmented" : "Insufficient space"}</span></td></tr>`).join("");
+    return `<div class="file-map" style="--block-columns:${Math.min(16, data.block_count)}">${blocks}</div><div class="disk-scale"><span>0</span><span>${Math.floor(data.block_count / 2)}</span><span>${data.block_count - 1}</span></div><div class="table-wrap"><table class="module-data-table"><thead><tr><th>FILE</th><th>SIZE</th><th>DATA BLOCKS</th><th>INDEX</th><th>STATUS</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+async function submitFileAllocation(compare = false) {
+    let files, reserved = [], block_count = Number($("fileBlockCount").value);
+    try {
+        files = parseFileRequests($("fileRequests").value);
+        if (!Number.isInteger(block_count) || block_count < 8 || block_count > 512) throw new Error("Disk blocks must be between 8 and 512.");
+        reserved = $("reservedBlocks").value.trim() ? parseIntegerList($("reservedBlocks").value, "Reserved blocks", 512) : [];
+        if (reserved.some(block => block >= block_count) || new Set(reserved).size !== reserved.length) throw new Error("Reserved blocks must be unique positions inside the disk range.");
+    } catch (error) { $("fileResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; return; }
+    const algorithms = compare ? ["Contiguous", "Linked", "Indexed"] : [$("fileAlgorithm").value];
+    try {
+        const results = await Promise.all(algorithms.map(algorithm => runFilePolicy(algorithm, files, block_count, reserved)));
+        if (!compare) {
+            const data = results[0];
+            $("fileResult").innerHTML = `<div class="module-result-head"><strong>${data.algorithm} allocation</strong><span>${data.used_count}/${data.block_count} blocks used · ${data.free_count} free${data.external_fragmentation ? " · external fragmentation detected" : ""}</span></div>${renderFileMap(data)}`;
+        } else {
+            const cards = results.map(data => {
+                const allocated = data.files.filter(file => file.allocated).length;
+                return `<article class="file-compare-card"><div class="module-result-head"><strong>${data.algorithm}</strong><span>${allocated}/${data.files.length} files · ${data.used_count} blocks used</span></div>${renderFileMap(data)}</article>`;
+            }).join("");
+            $("fileResult").innerHTML = `<div class="file-comparison">${cards}</div>`;
+        }
+        appendLog(`File allocation completed${compare ? " for all policies" : ` with ${algorithms[0]}`}.`, "success");
+    } catch (error) { $("fileResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; }
 }
 
 function renderSimulation(data) {
@@ -721,7 +854,7 @@ async function runSimulation() {
 }
 
 async function compareSimulations() {
-    const algorithms = ["FCFS", "SJF", "SRTF", "LJF", "HRRN", "Priority", "Priority Preemptive", "Aging", "Round Robin"];
+    const algorithms = ["FCFS", "SJF", "SRTF", "LJF", "HRRN", "Priority", "Priority Preemptive", "Aging", "Round Robin", "MLFQ"];
     const quantum = Number($("quantum").value);
     if (!Number.isInteger(quantum) || quantum < 1 || quantum > 10000) {
         $("simulationResult").innerHTML = "<p class='table-message'>Enter a time quantum between 1 and 10,000 ms.</p>";
@@ -737,8 +870,8 @@ async function compareSimulations() {
     }
     const buttons = [$("runSimulation"), $("compareSimulation")];
     buttons.forEach(button => { button.disabled = true; });
-    appendLog("Comparing all nine scheduling algorithms.", "info");
-    $("simulationResult").innerHTML = "<p class='table-message'>Comparing nine scheduling strategies…</p>";
+    appendLog(`Comparing all ${algorithms.length} scheduling algorithms.`, "info");
+    $("simulationResult").innerHTML = `<p class='table-message'>Comparing ${algorithms.length} scheduling strategies…</p>`;
     try {
         const comparisons = await Promise.all(algorithms.map(async algorithm => ({
             algorithm,
@@ -752,7 +885,7 @@ async function compareSimulations() {
         }).join("");
         lastSimulationResults = null;
         appendLog("Scheduling comparison completed.", "success");
-    $("simulationResult").innerHTML = `<div class="result-header"><div><h3>Algorithm comparison</h3><p>Same ${jobs.length}-process workload. Lower wait is better.</p></div><span class="result-badge">9 algorithms</span></div>
+    $("simulationResult").innerHTML = `<div class="result-header"><div><h3>Algorithm comparison</h3><p>Same ${jobs.length}-process workload. Lower wait is better.</p></div><span class="result-badge">${algorithms.length} algorithms</span></div>
             <div class="table-wrap"><table class="comparison-table"><thead><tr><th>ALGORITHM</th><th>AVG. WAITING</th><th>AVG. TURNAROUND</th><th>AVG. RESPONSE</th><th>CPU UTILIZATION</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     } catch (error) {
         console.error("Algorithm comparison failed:", error);
@@ -768,9 +901,15 @@ document.querySelectorAll(".nav-link[data-view], .brand[data-view]").forEach(lin
 window.addEventListener("popstate", () => switchView(viewLabels[window.location.hash.slice(1)] ? window.location.hash.slice(1) : "dashboard"));
 $("runMemory").addEventListener("click", () => submitMemory(false));
 $("compareMemory").addEventListener("click", () => submitMemory(true));
+$("runPartitions").addEventListener("click", () => submitPartitionAllocation(false));
+$("comparePartitions").addEventListener("click", () => submitPartitionAllocation(true));
 $("runDisk").addEventListener("click", () => submitDisk(false));
 $("compareDisk").addEventListener("click", () => submitDisk(true));
 $("runBanker").addEventListener("click", submitBanker);
+$("runSync").addEventListener("click", submitSynchronization);
+$("resetSync").addEventListener("click", () => { $("bufferCapacity").value = 3; $("syncOperations").value = "P, P, C, P, C, C, P"; });
+$("runFiles").addEventListener("click", () => submitFileAllocation(false));
+$("compareFiles").addEventListener("click", () => submitFileAllocation(true));
 document.querySelector(".aging-link").addEventListener("click", event => { event.preventDefault(); switchView("cpu", true); $("algorithm").value = "Aging"; });
 document.querySelectorAll(".chart-tab").forEach(button => {
     button.addEventListener("click", () => {
@@ -785,6 +924,21 @@ document.querySelectorAll(".chart-tab").forEach(button => {
 });
 $("processSearch").addEventListener("input", renderProcesses);
 $("processSort").addEventListener("change", renderProcesses);
+$("algorithm").addEventListener("change", () => {
+    const hints = {
+        "FCFS": "FCFS runs jobs in arrival order.",
+        "SJF": "SJF runs the shortest available job to completion.",
+        "SRTF": "SRTF can preempt the running job when a shorter job arrives.",
+        "LJF": "LJF runs the longest available job to completion.",
+        "HRRN": "HRRN balances waiting time and burst length using response ratio.",
+        "Priority": "Priority scheduling runs the highest-priority ready job first.",
+        "Priority Preemptive": "Preemptive priority can interrupt a job when a higher priority arrives.",
+        "Aging": "Aging raises waiting jobs’ priorities over time to reduce starvation.",
+        "Round Robin": "Round Robin rotates jobs through the ready queue using the selected quantum.",
+        "MLFQ": "MLFQ starts jobs in a high-priority queue, demotes CPU-heavy jobs, and periodically boosts all queues."
+    };
+    $("algorithmHint").textContent = hints[$("algorithm").value];
+});
 $("processTable").addEventListener("click", event => {
     const button = event.target.closest(".inspect-process");
     if (button) inspectProcess(Number(button.dataset.pid));

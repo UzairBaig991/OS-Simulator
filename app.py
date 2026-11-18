@@ -4,6 +4,7 @@ import psutil
 import time
 import os
 import platform
+import math
 
 app = Flask(__name__)
 start_time = time.time()
@@ -95,7 +96,54 @@ def schedule_jobs(jobs, algorithm, quantum):
             remaining[index] = 0
             completion[index] = clock
 
-    if algorithm == "Round Robin":
+    if algorithm == "MLFQ":
+        queues = [[], [], []]
+        base_quantum = quantum / 100
+        boost_interval = base_quantum * 8
+        next_boost = boost_interval
+
+        def admit_mlfq():
+            while pending and pending[0][1]["arrival"] <= clock:
+                queues[0].append(pending.pop(0)[0])
+
+        while pending or any(queues):
+            admit_mlfq()
+            if clock >= next_boost:
+                next_boost += (math.floor((clock - next_boost) / boost_interval) + 1) * boost_interval
+                queues[0] = queues[0] + queues[1] + queues[2]
+                queues[1], queues[2] = [], []
+            if not any(queues):
+                clock = float(pending[0][1]["arrival"])
+                continue
+
+            level = next(index for index, queue in enumerate(queues) if queue)
+            index = queues[level].pop(0)
+            quantum_limit = base_quantum * (2 ** level)
+            boost_limit = max(0, next_boost - clock)
+            duration = min(remaining[index], quantum_limit, boost_limit)
+            preempt_at_arrival = False
+            if level > 0 and pending:
+                until_arrival = pending[0][1]["arrival"] - clock
+                if 0 < until_arrival < duration:
+                    duration = until_arrival
+                    preempt_at_arrival = True
+            record(index, duration)
+            admit_mlfq()
+
+            if clock >= next_boost:
+                queues[0] = queues[0] + queues[1] + queues[2]
+                queues[1], queues[2] = [], []
+                if remaining[index] > 0:
+                    queues[0].append(index)
+                next_boost += boost_interval
+            elif remaining[index] > 0:
+                if preempt_at_arrival:
+                    queues[level].append(index)
+                elif duration >= quantum_limit - 0.000001:
+                    queues[min(level + 1, 2)].append(index)
+                else:
+                    queues[level].append(index)
+    elif algorithm == "Round Robin":
         queue = []
         time_slice = quantum / 100
         while pending or queue:
@@ -362,9 +410,10 @@ def simulate_bounded_buffer(capacity, operations):
     }
 
 
-def simulate_file_allocation(files, block_count, algorithm):
-    free = list(range(block_count))
-    used = set()
+def simulate_file_allocation(files, block_count, algorithm, reserved=None):
+    reserved = set(reserved or [])
+    free = [block for block in range(block_count) if block not in reserved]
+    used = reserved.copy()
     results = []
     for file in files:
         size = file["blocks"]
@@ -401,9 +450,55 @@ def simulate_file_allocation(files, block_count, algorithm):
                         "index_block": index_block if allocated else None})
     return {
         "algorithm": algorithm, "block_count": block_count, "used_count": len(used),
+        "reserved": sorted(reserved),
         "free_count": block_count - len(used), "files": results,
         "external_fragmentation": any(item["fragmented"] for item in results)
     }
+
+
+def simulate_partition_allocation(partitions, processes, algorithm):
+    available = [True] * len(partitions)
+    placements = []
+    next_position = 0
+    internal_fragmentation = 0
+    external_fragmentation = False
+    for process in processes:
+        candidates = [index for index, size in enumerate(partitions)
+                      if available[index] and size >= process["size"]]
+        selected = None
+        if candidates:
+            if algorithm == "First Fit":
+                selected = candidates[0]
+            elif algorithm == "Best Fit":
+                selected = min(candidates, key=lambda index: (partitions[index] - process["size"], index))
+            elif algorithm == "Worst Fit":
+                selected = max(candidates, key=lambda index: (partitions[index] - process["size"], -index))
+            else:
+                selected = next((index for offset in range(len(partitions))
+                                 if (index := (next_position + offset) % len(partitions)) in candidates), None)
+        if selected is None:
+            external_fragmentation |= sum(partitions[index] for index, is_free in enumerate(available) if is_free) >= process["size"]
+            placements.append({**process, "partition": None, "allocated": False, "internal_fragmentation": 0})
+            continue
+        available[selected] = False
+        waste = partitions[selected] - process["size"]
+        internal_fragmentation += waste
+        placements.append({**process, "partition": selected, "allocated": True, "internal_fragmentation": waste})
+        next_position = (selected + 1) % len(partitions)
+
+    layout = []
+    placement_by_partition = {item["partition"]: item for item in placements if item["allocated"]}
+    for index, size in enumerate(partitions):
+        allocation = placement_by_partition.get(index)
+        layout.append({"partition": index + 1, "size": size,
+                       "process": allocation["name"] if allocation else None,
+                       "process_size": allocation["size"] if allocation else 0,
+                       "internal_fragmentation": allocation["internal_fragmentation"] if allocation else 0})
+    return {"algorithm": algorithm, "placements": placements, "layout": layout,
+            "total_memory": sum(partitions), "free_memory": sum(size for index, size in enumerate(partitions) if available[index]),
+            "allocated_processes": sum(item["allocated"] for item in placements),
+            "internal_fragmentation": internal_fragmentation,
+            "external_fragmentation": external_fragmentation}
 
 
 @app.route("/")
@@ -486,7 +581,7 @@ def simulate():
 
     algorithm = data.get("algorithm", "Round Robin")
     if not isinstance(algorithm, str) or algorithm not in {
-        "FCFS", "SJF", "SRTF", "LJF", "HRRN", "Priority", "Priority Preemptive",
+        "FCFS", "SJF", "SRTF", "LJF", "HRRN", "Priority", "Priority Preemptive", "MLFQ",
         "Aging", "Round Robin"
     }:
         return jsonify({"error": "Choose a supported scheduling algorithm."}), 400
@@ -517,7 +612,7 @@ def memory_simulate():
     pages = data.get("pages")
     algorithm = data.get("algorithm")
     frames = data.get("frames")
-    if algorithm not in {"FIFO", "LRU", "Optimal"}:
+    if not isinstance(algorithm, str) or algorithm not in {"FIFO", "LRU", "Optimal"}:
         return jsonify({"error": "Choose FIFO, LRU, or Optimal page replacement."}), 400
     if not isinstance(pages, list) or not 1 <= len(pages) <= 100:
         return jsonify({"error": "Enter between 1 and 100 page references."}), 400
@@ -526,6 +621,36 @@ def memory_simulate():
     if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= 16:
         return jsonify({"error": "Frame count must be between 1 and 16."}), 400
     return jsonify(simulate_memory([str(page).strip() for page in pages], frames, algorithm))
+
+
+@app.route("/api/memory/partitions", methods=["POST"])
+def memory_partition_simulate():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected a JSON object."}), 400
+    partitions, processes, algorithm = data.get("partitions"), data.get("processes"), data.get("algorithm")
+    if not isinstance(algorithm, str) or algorithm not in {"First Fit", "Best Fit", "Worst Fit", "Next Fit"}:
+        return jsonify({"error": "Choose First Fit, Best Fit, Worst Fit, or Next Fit."}), 400
+    if not isinstance(partitions, list) or not 1 <= len(partitions) <= 32 or any(
+        isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 1000000 for size in partitions
+    ) or sum(partitions) > 1000000:
+        return jsonify({"error": "Provide 1–32 positive partition sizes totaling at most 1,000,000 KB."}), 400
+    if not isinstance(processes, list) or not 1 <= len(processes) <= 32:
+        return jsonify({"error": "Provide 1–32 processes."}), 400
+    names, clean_processes = set(), []
+    for index, item in enumerate(processes, start=1):
+        if not isinstance(item, dict):
+            return jsonify({"error": f"Process {index} must be an object."}), 400
+        name, size = item.get("name"), item.get("size")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 24:
+            return jsonify({"error": f"Process {index} needs a name of 1–24 characters."}), 400
+        if name.strip().casefold() in names:
+            return jsonify({"error": "Process names must be unique."}), 400
+        names.add(name.strip().casefold())
+        if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 1000000:
+            return jsonify({"error": f"{name}: process size must be between 1 and 1,000,000 KB."}), 400
+        clean_processes.append({"name": name.strip(), "size": size})
+    return jsonify(simulate_partition_allocation(partitions, clean_processes, algorithm))
 
 
 @app.route("/api/disk/simulate", methods=["POST"])
@@ -538,9 +663,9 @@ def disk_simulate():
     max_cylinder = data.get("max_cylinder", 199)
     algorithm = data.get("algorithm")
     direction = data.get("direction", "right")
-    if algorithm not in {"FCFS", "SSTF", "SCAN", "C-SCAN", "LOOK", "C-LOOK"}:
+    if not isinstance(algorithm, str) or algorithm not in {"FCFS", "SSTF", "SCAN", "C-SCAN", "LOOK", "C-LOOK"}:
         return jsonify({"error": "Choose a supported disk scheduling algorithm."}), 400
-    if direction not in {"left", "right"}:
+    if not isinstance(direction, str) or direction not in {"left", "right"}:
         return jsonify({"error": "Direction must be left or right."}), 400
     if isinstance(max_cylinder, bool) or not isinstance(max_cylinder, int) or not 1 <= max_cylinder <= 100000:
         return jsonify({"error": "Maximum cylinder must be between 1 and 100,000."}), 400
@@ -591,10 +716,15 @@ def file_allocation_simulate():
     if not isinstance(data, dict):
         return jsonify({"error": "Expected a JSON object."}), 400
     files, block_count, algorithm = data.get("files"), data.get("block_count"), data.get("algorithm")
-    if algorithm not in {"Contiguous", "Linked", "Indexed"}:
+    reserved = data.get("reserved", [])
+    if not isinstance(algorithm, str) or algorithm not in {"Contiguous", "Linked", "Indexed"}:
         return jsonify({"error": "Choose Contiguous, Linked, or Indexed allocation."}), 400
     if isinstance(block_count, bool) or not isinstance(block_count, int) or not 8 <= block_count <= 512:
         return jsonify({"error": "Disk block count must be between 8 and 512."}), 400
+    if not isinstance(reserved, list) or len(reserved) > block_count or any(
+        isinstance(block, bool) or not isinstance(block, int) or not 0 <= block < block_count for block in reserved
+    ) or len(set(reserved)) != len(reserved):
+        return jsonify({"error": "Reserved blocks must be unique block numbers within the disk range."}), 400
     if not isinstance(files, list) or not 1 <= len(files) <= 25:
         return jsonify({"error": "Enter between 1 and 25 files."}), 400
     names = set()
@@ -611,7 +741,7 @@ def file_allocation_simulate():
         if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 512:
             return jsonify({"error": f"{name}: block count must be between 1 and 512."}), 400
         clean_files.append({"name": name.strip(), "blocks": size})
-    return jsonify(simulate_file_allocation(clean_files, block_count, algorithm))
+    return jsonify(simulate_file_allocation(clean_files, block_count, algorithm, reserved))
 
 
 if __name__ == "__main__":
