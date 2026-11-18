@@ -3,6 +3,7 @@ from flask import Flask, render_template, jsonify, request
 import psutil
 import time
 import os
+import platform
 
 app = Flask(__name__)
 start_time = time.time()
@@ -330,7 +331,10 @@ def stats():
         "network_sent": net.bytes_sent,
         "network_recv": net.bytes_recv,
         "disk_read": disk_io.read_bytes if disk_io else 0,
-        "disk_write": disk_io.write_bytes if disk_io else 0
+        "disk_write": disk_io.write_bytes if disk_io else 0,
+        "os_name": platform.system(),
+        "os_release": platform.release(),
+        "architecture": platform.machine()
     })
 
 
@@ -338,18 +342,20 @@ def stats():
 def processes():
     result = []
 
-    for process in psutil.process_iter(["pid", "name", "memory_percent", "status", "num_threads", "username", "cpu_percent"]):
+    for process in psutil.process_iter(["pid", "name", "memory_percent", "memory_info", "status", "num_threads", "username", "cpu_percent", "create_time"]):
         try:
             item = process.info
             result.append({
                 "pid": item["pid"],
                 "name": item["name"] or "Unknown",
                 "memory": round(item["memory_percent"] or 0, 2),
+                "rss_mb": round((item["memory_info"].rss if item["memory_info"] else 0) / (1024 ** 2), 1),
                 # psutil reports process CPU as a percentage of one core; normalize
                 # it to the same total-machine scale used by system CPU utilization.
                 "cpu": round(min(100, (item["cpu_percent"] or 0) / CPU_COUNT), 2),
                 "threads": item["num_threads"] or 0,
                 "user": item["username"] or "Unknown",
+                "created": item["create_time"],
                 "status": item["status"] or "Unknown"
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -453,4 +459,4 @@ def banker_simulate():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="127.0.0.1", debug=os.environ.get("FLASK_DEBUG") == "1")

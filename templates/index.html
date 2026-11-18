@@ -11,7 +11,7 @@
 <body>
 <div class="app-shell">
     <aside class="sidebar">
-        <a class="brand" href="#dashboard" aria-label="OS Simulator dashboard">
+        <a class="brand" href="#dashboard" data-view="dashboard" aria-label="OS Simulator dashboard">
             <span class="brand-mark">▦</span>
             <span><strong>OS Simulator</strong><small>RESOURCE CONTROL</small></span>
         </a>
@@ -20,12 +20,12 @@
             <a class="nav-link active" href="#dashboard" data-view="dashboard"><span class="nav-icon">⌂</span> Dashboard</a>
             <a class="nav-link" href="#processes" data-view="processes"><span class="nav-icon">⚙</span> Process Manager</a>
             <a class="nav-link" href="#resources" data-view="resources"><span class="nav-icon">▥</span> Resource Monitor</a>
-            <a class="nav-link" href="#scheduler" data-view="cpu"><span class="nav-icon">▱</span> CPU Scheduling</a>
-            <a class="nav-link" href="#memory-manager" data-view="memory"><span class="nav-icon">▦</span> Memory Manager</a>
-            <a class="nav-link" href="#disk-manager" data-view="disk"><span class="nav-icon">◉</span> Disk Scheduling</a>
-            <a class="nav-link" href="#deadlock-manager" data-view="deadlock"><span class="nav-icon">⬡</span> Deadlock & Safety</a>
+            <a class="nav-link" href="#cpu" data-view="cpu"><span class="nav-icon">▱</span> CPU Scheduling</a>
+            <a class="nav-link" href="#memory" data-view="memory"><span class="nav-icon">▦</span> Memory Manager</a>
+            <a class="nav-link" href="#disk" data-view="disk"><span class="nav-icon">◉</span> Disk Scheduling</a>
+            <a class="nav-link" href="#deadlock" data-view="deadlock"><span class="nav-icon">⬡</span> Deadlock & Safety</a>
             <a class="nav-link" href="#starvation" data-view="starvation"><span class="nav-icon">⬟</span> Starvation Prevention</a>
-            <a class="nav-link" href="#system-info" data-view="system"><span class="nav-icon">ⓘ</span> System Info</a>
+            <a class="nav-link" href="#system" data-view="system"><span class="nav-icon">ⓘ</span> System Info</a>
         </nav>
         <div class="sidebar-note">
             <span class="status-pulse"></span>
@@ -119,8 +119,8 @@
             </div>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th scope="col">PROCESS</th><th scope="col">PID</th><th scope="col">CPU</th><th scope="col">MEMORY</th><th scope="col">THREADS</th><th scope="col">STATUS</th></tr></thead>
-                    <tbody id="processTable"><tr><td colspan="6" class="table-message">Loading processes…</td></tr></tbody>
+                    <thead><tr><th scope="col">PROCESS</th><th scope="col">PID</th><th scope="col">CPU</th><th scope="col">MEMORY</th><th scope="col">THREADS</th><th scope="col">STATUS</th><th scope="col"><span class="sr-only">Details</span></th></tr></thead>
+                    <tbody id="processTable"><tr><td colspan="7" class="table-message">Loading processes…</td></tr></tbody>
                 </table>
             </div>
             <div class="table-footer"><span id="processSummary">Refreshing automatically</span><div class="live-controls"><label>Refresh <select id="refreshRate" aria-label="Refresh interval"><option value="2000" selected>2 sec</option><option value="5000">5 sec</option><option value="10000">10 sec</option></select></label><button id="pauseMonitor" class="text-button" type="button">Pause live updates</button></div></div>
@@ -141,6 +141,7 @@
                 <div class="workload-toolbar">
                     <span id="workloadStatus" class="workload-status" aria-live="polite">Sample workload ready</span>
                     <div class="workload-actions">
+                        <label class="preset-label">Preset<select id="workloadPreset" aria-label="Load workload preset"><option value="">Choose preset…</option><option value="cpu">CPU bound</option><option value="io">Short bursts</option><option value="priority">Priority mix</option></select></label>
                         <button id="restoreWorkload" class="button button-secondary" type="button">Load sample</button>
                         <button id="saveWorkload" class="button button-secondary" type="button">Save workload</button>
                         <button id="addProcess" class="button button-secondary" type="button"><span aria-hidden="true">+</span> Add process</button>
@@ -197,6 +198,16 @@
             <a class="button button-secondary aging-link" href="#scheduler">Try priority with aging <span aria-hidden="true">↗</span></a>
         </section>
         </div>
+
+        <dialog id="processDialog" class="process-dialog" aria-labelledby="inspectName">
+            <div class="dialog-top"><div><p class="eyebrow">PROCESS INSPECTOR</p><h2 id="inspectName">Process details</h2></div><form method="dialog"><button class="dialog-close" aria-label="Close process details">×</button></form></div>
+            <div class="process-inspector-grid">
+                <div><span>PID</span><strong id="inspectPid">—</strong></div><div><span>CPU</span><strong id="inspectCpu">—</strong></div>
+                <div><span>Memory</span><strong id="inspectMemory">—</strong></div><div><span>Resident memory</span><strong id="inspectRss">—</strong></div>
+                <div><span>Threads</span><strong id="inspectThreads">—</strong></div><div><span>Status</span><strong id="inspectStatus">—</strong></div>
+                <div><span>User</span><strong id="inspectUser">—</strong></div><div><span>Started</span><strong id="inspectCreated">—</strong></div>
+            </div>
+        </dialog>
 
         <section class="module-page" id="memory-manager" data-view-page="memory" hidden>
             <div class="module-heading"><p class="eyebrow">VIRTUAL MEMORY</p><h1>Memory Manager</h1><p>Compare page replacement policies and inspect every frame after each reference.</p></div>
@@ -258,6 +269,9 @@
                 <div><span>Disk used</span><strong id="diskUsage">--</strong><small id="diskDetail">System volume</small></div>
                 <div><span>Swap used</span><strong id="swapUsage">--</strong><small>Virtual memory</small></div>
                 <div><span>Network totals</span><strong id="networkTotals">--</strong><small>Received · sent</small></div>
+                <div><span>Operating system</span><strong id="osName">--</strong></div>
+                <div><span>OS release</span><strong id="osRelease">--</strong></div>
+                <div><span>Architecture</span><strong id="architecture">--</strong></div>
             </section>
         </details>
 

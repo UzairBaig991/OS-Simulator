@@ -267,6 +267,8 @@ tbody tr:hover { background: #ffffff04; }
 .workload-status { overflow: hidden; color: #8290a5; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .workload-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .workload-actions .button { min-height: 31px; padding: 0 9px; font-size: 9px; }
+.preset-label { display: flex; align-items: center; gap: 6px; color: #8898bb; font-size: 9px; }
+.preset-label select { max-width: 124px; min-height: 31px; padding: 0 7px; border: 1px solid #283859; border-radius: 6px; color: #c9d5f0; background: #101a31; font-size: 9px; }
 .workload-table-wrap { margin-top: 7px; }
 .workload-table { min-width: 470px; }
 .workload-table th, .workload-table td { padding: 6px 6px; }
@@ -383,7 +385,7 @@ footer { display: flex; justify-content: center; align-items: center; gap: 7px; 
 .process-panel .process-tools { width: 100%; flex-wrap: wrap; }
 .process-panel .search-box { flex: 1; }
 .process-panel .search-box input { width: 100%; }
-.process-panel table { min-width: 590px; }
+.process-panel table { min-width: 660px; }
 .process-panel .table-wrap { max-height: 298px; overflow: auto; }
 .process-panel thead { position: sticky; top: 0; z-index: 1; background: #151d3b; }
 .operations-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(220px, .82fr) minmax(250px, .9fr); gap: 14px; align-items: stretch; }
@@ -449,6 +451,19 @@ footer { display: flex; justify-content: center; align-items: center; gap: 7px; 
 .safety-result strong { color: #a7f2d0; font-size: 12px; }
 .unsafe strong { color: #ffb1b3; }
 .safety-result p { margin: 4px 0 0; color: #bec9e4; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.inspect-process { padding: 5px 8px; border: 1px solid #344875; border-radius: 6px; color: #b9cbff; background: #152346; font-size: 9px; cursor: pointer; }
+.inspect-process:hover { border-color: #5595ff; color: #fff; background: #1a3976; }
+.process-dialog { width: min(540px, calc(100vw - 28px)); padding: 22px; border: 1px solid #384878; border-radius: 16px; color: #edf2ff; background: linear-gradient(145deg, #171f40, #0e152b); box-shadow: 0 24px 90px #000b; }
+.process-dialog::backdrop { background: #050916c9; backdrop-filter: blur(5px); }
+.dialog-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.dialog-top .eyebrow { margin-bottom: 6px; color: #7d9cff; }
+.dialog-top h2 { margin: 0; color: #f3f5ff; font-size: 20px; overflow-wrap: anywhere; }
+.dialog-close { width: 31px; height: 31px; border: 1px solid #33436d; border-radius: 8px; color: #b4c1e2; background: #131d39; font-size: 19px; cursor: pointer; }
+.process-inspector-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 20px; }
+.process-inspector-grid div { min-width: 0; padding: 11px; border: 1px solid #29365d; border-radius: 8px; background: #10182f; }
+.process-inspector-grid span, .process-inspector-grid strong { display: block; }
+.process-inspector-grid span { color: #8291b4; font-size: 9px; }
+.process-inspector-grid strong { overflow: hidden; margin-top: 5px; color: #e4ebff; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 body[data-active-view="resources"] .overview-grid, body[data-active-view="processes"] .overview-grid { grid-template-columns: minmax(0, 1fr); }
 body[data-active-view="cpu"] .operations-grid { grid-template-columns: minmax(0, 1.15fr) minmax(280px, .85fr); }
 body[data-active-view="starvation"] .operations-grid { grid-template-columns: minmax(0, 1fr); }
@@ -492,7 +507,7 @@ body[data-active-view="starvation"] .operations-grid { grid-template-columns: mi
 @media (max-width: 520px) {
     .main-content { padding-right: 13px; padding-left: 13px; }
     .overview-grid { grid-template-columns: minmax(0, 1fr); }
-    .process-panel table { min-width: 590px; }
+    .process-panel table { min-width: 660px; }
     .system-log { min-height: 150px; }
     .topbar-right { gap: 10px; }
     .last-updated { max-width: 112px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

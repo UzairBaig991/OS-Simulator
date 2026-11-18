@@ -107,6 +107,9 @@ async function loadStats() {
         $("diskDetail").textContent = `${data.disk_used} GB of ${data.disk_total} GB`;
         $("swapUsage").textContent = `${Number(data.swap).toFixed(1)}%`;
         $("networkTotals").textContent = `${formatBytes(data.network_recv)} / ${formatBytes(data.network_sent)}`;
+        $("osName").textContent = data.os_name || "Unknown";
+        $("osRelease").textContent = data.os_release || "Unknown";
+        $("architecture").textContent = data.architecture || "Unknown";
         $("lastUpdated").textContent = `Updated ${new Date().toLocaleTimeString([], {
             hour: "2-digit",
             minute: "2-digit",
@@ -271,7 +274,7 @@ function renderProcesses() {
         });
     const tbody = $("processTable");
     if (!processes.length) {
-        tbody.innerHTML = `<tr><td colspan="6" class="table-message">${
+        tbody.innerHTML = `<tr><td colspan="7" class="table-message">${
             currentProcesses.length ? "No processes match your search." : "No processes found."
         }</td></tr>`;
         $("processSummary").textContent = currentProcesses.length
@@ -292,6 +295,7 @@ function renderProcesses() {
             <td class="memory-cell"><span class="memory-reading"><span>${memory.toFixed(2)}%</span><span class="memory-track"><i style="width:${memory}%"></i></span></span></td>
             <td>${Number(process.threads) || 0}</td>
             <td><span class="status-tag ${escapeHTML(status)}">${escapeHTML(status)}</span></td>
+            <td><button class="inspect-process" type="button" data-pid="${Number(process.pid)}">Inspect</button></td>
         </tr>`;
     }).join("");
     $("processSummary").textContent = `Showing ${processes.length} of ${currentProcesses.length} processes`;
@@ -304,7 +308,7 @@ async function loadProcesses() {
         renderProcesses();
     } catch (error) {
         console.error("Could not load processes:", error);
-        tbody.innerHTML = "<tr><td colspan='6' class='table-message'>Unable to load processes. Check the system monitor.</td></tr>";
+        tbody.innerHTML = "<tr><td colspan='7' class='table-message'>Unable to load processes. Check the system monitor.</td></tr>";
         $("processSummary").textContent = "Process data unavailable";
     }
 }
@@ -314,6 +318,22 @@ function escapeHTML(value) {
         "&": "&amp;", "<": "&lt;", ">": "&gt;",
         '"': "&quot;", "'": "&#39;"
     })[ch]);
+}
+
+function inspectProcess(pid) {
+    const process = currentProcesses.find(item => item.pid === pid);
+    if (!process) return;
+    $("inspectName").textContent = process.name || "Unknown process";
+    $("inspectPid").textContent = process.pid;
+    $("inspectCpu").textContent = `${Number(process.cpu || 0).toFixed(2)}%`;
+    $("inspectMemory").textContent = `${Number(process.memory || 0).toFixed(2)}%`;
+    $("inspectRss").textContent = `${Number(process.rss_mb || 0).toFixed(1)} MB`;
+    $("inspectThreads").textContent = Number(process.threads || 0).toLocaleString();
+    $("inspectStatus").textContent = process.status || "Unknown";
+    $("inspectUser").textContent = process.user || "Unknown";
+    $("inspectCreated").textContent = process.created
+        ? new Date(Number(process.created) * 1000).toLocaleString() : "Unknown";
+    $("processDialog").showModal();
 }
 
 function formatNumber(value) {
@@ -433,6 +453,30 @@ function addProcess() {
     document.querySelector("#workloadTable tr:last-child [data-field='name']").focus();
 }
 
+function loadWorkloadPreset(preset) {
+    const presets = {
+        cpu: [
+            { name: "Compile", arrival: 0, burst: 14, priority: 3 },
+            { name: "Render", arrival: 1, burst: 11, priority: 4 },
+            { name: "Index", arrival: 2, burst: 16, priority: 5 },
+            { name: "Encode", arrival: 3, burst: 9, priority: 2 }
+        ],
+        io: [
+            { name: "Browser", arrival: 0, burst: 3, priority: 3 },
+            { name: "Editor", arrival: 2, burst: 2, priority: 2 },
+            { name: "Sync", arrival: 4, burst: 4, priority: 4 },
+            { name: "Terminal", arrival: 6, burst: 2, priority: 1 }
+        ],
+        priority: [
+            { name: "Urgent", arrival: 0, burst: 7, priority: 1 },
+            { name: "Backup", arrival: 1, burst: 12, priority: 8 },
+            { name: "Service", arrival: 2, burst: 8, priority: 5 },
+            { name: "Update", arrival: 3, burst: 10, priority: 9 }
+        ]
+    };
+    if (presets[preset]) renderWorkload(presets[preset].map(job => ({ ...job })));
+}
+
 function exportResultsCSV() {
     if (!lastSimulationResults) return;
     const columns = ["name", "arrival", "burst", "priority", "waiting", "turnaround", "response", "completion"];
@@ -452,7 +496,7 @@ function exportResultsCSV() {
 }
 
 function exportProcessesCSV() {
-    const columns = ["pid", "name", "cpu", "memory", "threads", "status", "user"];
+    const columns = ["pid", "name", "cpu", "memory", "rss_mb", "threads", "status", "user", "created"];
     const cell = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
     const csv = [columns.join(","), ...currentProcesses.map(process => columns.map(key => cell(process[key])).join(","))].join("\r\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -478,7 +522,7 @@ const viewDescriptions = {
     system: "Review live host resource and operating system telemetry."
 };
 
-function switchView(view) {
+function switchView(view, updateHistory = false) {
     if (!viewLabels[view]) return;
     const visiblePages = {
         dashboard: ["dashboard", "resources", "processes"],
@@ -509,6 +553,8 @@ function switchView(view) {
         $("moduleDescription").textContent = viewDescriptions[view];
     }
     document.body.dataset.activeView = view;
+    if (updateHistory && window.location.hash !== `#${view}`) window.history.pushState({ view }, "", `#${view}`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
     if (view === "dashboard" || view === "resources") drawResourceChart();
 }
 
@@ -716,15 +762,16 @@ async function compareSimulations() {
     }
 }
 
-document.querySelectorAll(".nav-link[data-view]").forEach(link => {
-    link.addEventListener("click", event => { event.preventDefault(); switchView(link.dataset.view); });
+document.querySelectorAll(".nav-link[data-view], .brand[data-view]").forEach(link => {
+    link.addEventListener("click", event => { event.preventDefault(); switchView(link.dataset.view, true); });
 });
+window.addEventListener("popstate", () => switchView(viewLabels[window.location.hash.slice(1)] ? window.location.hash.slice(1) : "dashboard"));
 $("runMemory").addEventListener("click", () => submitMemory(false));
 $("compareMemory").addEventListener("click", () => submitMemory(true));
 $("runDisk").addEventListener("click", () => submitDisk(false));
 $("compareDisk").addEventListener("click", () => submitDisk(true));
 $("runBanker").addEventListener("click", submitBanker);
-document.querySelector(".aging-link").addEventListener("click", event => { event.preventDefault(); switchView("cpu"); $("algorithm").value = "Aging"; });
+document.querySelector(".aging-link").addEventListener("click", event => { event.preventDefault(); switchView("cpu", true); $("algorithm").value = "Aging"; });
 document.querySelectorAll(".chart-tab").forEach(button => {
     button.addEventListener("click", () => {
         selectedChart = button.dataset.chart;
@@ -738,6 +785,10 @@ document.querySelectorAll(".chart-tab").forEach(button => {
 });
 $("processSearch").addEventListener("input", renderProcesses);
 $("processSort").addEventListener("change", renderProcesses);
+$("processTable").addEventListener("click", event => {
+    const button = event.target.closest(".inspect-process");
+    if (button) inspectProcess(Number(button.dataset.pid));
+});
 $("refreshButton").addEventListener("click", () => {
     loadStats();
     loadProcesses();
@@ -754,6 +805,10 @@ $("clearLog").addEventListener("click", () => { $("systemLog").replaceChildren()
 $("runSimulation").addEventListener("click", runSimulation);
 $("compareSimulation").addEventListener("click", compareSimulations);
 $("addProcess").addEventListener("click", addProcess);
+$("workloadPreset").addEventListener("change", event => {
+    loadWorkloadPreset(event.target.value);
+    event.target.value = "";
+});
 $("saveWorkload").addEventListener("click", saveWorkload);
 $("restoreWorkload").addEventListener("click", () => {
     renderWorkload(SAMPLE_WORKLOAD.map(job => ({ ...job })));
@@ -803,4 +858,5 @@ if (restoredWorkload) {
 loadStats();
 loadProcesses();
 scheduleMonitor();
-switchView("dashboard");
+const requestedView = window.location.hash.slice(1);
+switchView(viewLabels[requestedView] ? requestedView : "dashboard");
