@@ -292,6 +292,120 @@ def bankers_safety(allocation, maximum, available):
             "remaining": [f"P{p}" for p, done in enumerate(finished) if not done]}
 
 
+def simulate_bounded_buffer(capacity, operations):
+    buffer = []
+    producer_queue, consumer_queue = [], []
+    trace = []
+    task_counts = {"P": 0, "C": 0}
+    item_count = 0
+    empty_count, full_count, mutex = capacity, 0, 1
+
+    def record(task, event):
+        trace.append({"step": len(trace) + 1, "task": task, "event": event,
+                      "buffer": buffer.copy(), "empty": empty_count,
+                      "full": full_count, "mutex": mutex})
+
+    def perform(task, operation):
+        nonlocal item_count, empty_count, full_count, mutex
+        if operation == "P":
+            if empty_count == 0:
+                producer_queue.append(task)
+                record(task, "wait(empty): buffer is full")
+                return
+            empty_count -= 1
+            record(task, "wait(empty): acquired")
+            mutex = 0
+            record(task, "wait(mutex): acquired")
+            item_count += 1
+            buffer.append(f"Item {item_count}")
+            record(task, f"produce Item {item_count}")
+            mutex = 1
+            record(task, "signal(mutex)")
+            full_count += 1
+            record(task, "signal(full)")
+            if consumer_queue and full_count:
+                waiting = consumer_queue.pop(0)
+                record(waiting, "woken by signal(full)")
+                perform(waiting, "C")
+        else:
+            if full_count == 0:
+                consumer_queue.append(task)
+                record(task, "wait(full): buffer is empty")
+                return
+            full_count -= 1
+            record(task, "wait(full): acquired")
+            mutex = 0
+            record(task, "wait(mutex): acquired")
+            item = buffer.pop(0)
+            record(task, f"consume {item}")
+            mutex = 1
+            record(task, "signal(mutex)")
+            empty_count += 1
+            record(task, "signal(empty)")
+            if producer_queue and empty_count:
+                waiting = producer_queue.pop(0)
+                record(waiting, "woken by signal(empty)")
+                perform(waiting, "P")
+
+    for operation in operations:
+        task_counts[operation] += 1
+        role = "Producer" if operation == "P" else "Consumer"
+        perform(f"{role} {task_counts[operation]}", operation)
+    return {
+        "capacity": capacity,
+        "trace": trace,
+        "buffer": buffer,
+        "empty": empty_count,
+        "full": full_count,
+        "blocked": producer_queue + consumer_queue,
+        "completed_operations": len(operations) - len(producer_queue) - len(consumer_queue)
+    }
+
+
+def simulate_file_allocation(files, block_count, algorithm):
+    free = list(range(block_count))
+    used = set()
+    results = []
+    for file in files:
+        size = file["blocks"]
+        data_blocks = []
+        index_block = None
+        if algorithm == "Contiguous":
+            run_start = None
+            run_length = 0
+            for block in free:
+                if run_start is not None and block == previous + 1:
+                    run_length += 1
+                else:
+                    run_start, run_length = block, 1
+                previous = block
+                if run_length == size:
+                    data_blocks = list(range(run_start, run_start + size))
+                    break
+        elif algorithm == "Linked":
+            allocation_order = free[::2] + free[1::2]
+            data_blocks = allocation_order[:size]
+        else:
+            if len(free) >= size + 1:
+                index_block = free[0]
+                data_blocks = free[1:size + 1]
+
+        allocated = len(data_blocks) == size
+        fragmented = algorithm == "Contiguous" and not allocated and len(free) >= size
+        if allocated:
+            allocated_blocks = ([index_block] if index_block is not None else []) + data_blocks
+            used.update(allocated_blocks)
+            free = [block for block in free if block not in set(allocated_blocks)]
+        results.append({"name": file["name"], "requested": size, "allocated": allocated,
+                        "fragmented": fragmented, "blocks": data_blocks if allocated else [],
+                        "index_block": index_block if allocated else None})
+    return {
+        "algorithm": algorithm, "block_count": block_count, "used_count": len(used),
+        "free_count": block_count - len(used), "files": results,
+        "external_fragmentation": any(item["fragmented"] for item in results)
+    }
+
+
 @app.route("/")
 def dashboard():
     return render_template("index.html", aging_interval=AGING_INTERVAL)
@@ -456,6 +570,48 @@ def banker_simulate():
         return jsonify(bankers_safety(allocation, maximum, available))
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
+
+
+@app.route("/api/sync/bounded-buffer", methods=["POST"])
+def bounded_buffer_simulate():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected a JSON object."}), 400
+    capacity, operations = data.get("capacity"), data.get("operations")
+    if isinstance(capacity, bool) or not isinstance(capacity, int) or not 1 <= capacity <= 20:
+        return jsonify({"error": "Buffer capacity must be between 1 and 20."}), 400
+    if not isinstance(operations, list) or not 1 <= len(operations) <= 40 or any(not isinstance(item, str) or item not in {"P", "C"} for item in operations):
+        return jsonify({"error": "Provide 1–40 operations using P (produce) or C (consume)."}), 400
+    return jsonify(simulate_bounded_buffer(capacity, operations))
+
+
+@app.route("/api/files/allocation", methods=["POST"])
+def file_allocation_simulate():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected a JSON object."}), 400
+    files, block_count, algorithm = data.get("files"), data.get("block_count"), data.get("algorithm")
+    if algorithm not in {"Contiguous", "Linked", "Indexed"}:
+        return jsonify({"error": "Choose Contiguous, Linked, or Indexed allocation."}), 400
+    if isinstance(block_count, bool) or not isinstance(block_count, int) or not 8 <= block_count <= 512:
+        return jsonify({"error": "Disk block count must be between 8 and 512."}), 400
+    if not isinstance(files, list) or not 1 <= len(files) <= 25:
+        return jsonify({"error": "Enter between 1 and 25 files."}), 400
+    names = set()
+    clean_files = []
+    for index, item in enumerate(files, start=1):
+        if not isinstance(item, dict):
+            return jsonify({"error": f"File {index} must be an object."}), 400
+        name, size = item.get("name"), item.get("blocks")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 24:
+            return jsonify({"error": f"File {index} needs a name of 1–24 characters."}), 400
+        if name.strip().casefold() in names:
+            return jsonify({"error": "File names must be unique."}), 400
+        names.add(name.strip().casefold())
+        if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 512:
+            return jsonify({"error": f"{name}: block count must be between 1 and 512."}), 400
+        clean_files.append({"name": name.strip(), "blocks": size})
+    return jsonify(simulate_file_allocation(clean_files, block_count, algorithm))
 
 
 if __name__ == "__main__":
