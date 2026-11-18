@@ -1,7 +1,12 @@
 const $ = (id) => document.getElementById(id);
 const resourceHistory = [];
+let selectedChart = "cpu";
+const activeResourceAlerts = new Set();
 let currentProcesses = [];
 let lastSimulationResults = null;
+let monitorTimer = null;
+let monitorPaused = false;
+let lastConnectionState = null;
 const SAMPLE_WORKLOAD = [
     { name: "Process A", arrival: 0, burst: 8, priority: 3 },
     { name: "Process B", arrival: 1, burst: 4, priority: 1 },
@@ -18,6 +23,30 @@ function formatUptime(seconds) {
     return days ? `${days}d ${remainingHours}h` : `${hours}h ${minutes}m`;
 }
 
+function formatBytes(bytes) {
+    if (!Number.isFinite(Number(bytes))) return "--";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = Number(bytes), unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+    return `${value.toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`;
+}
+
+function appendLog(message, kind = "info") {
+    const log = $("systemLog");
+    if (!log) return;
+    const row = document.createElement("p");
+    const marker = document.createElement("i");
+    const text = document.createElement("span");
+    const time = document.createElement("time");
+    marker.className = `log-${kind}`;
+    text.textContent = message;
+    time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    row.append(marker, text, time);
+    log.append(row);
+    while (log.children.length > 30) log.firstElementChild.remove();
+    log.scrollTop = log.scrollHeight;
+}
+
 async function fetchJSON(url, options) {
     const response = await fetch(url, options);
     const data = await response.json();
@@ -31,11 +60,35 @@ function setSystemStatus(online) {
     const status = $("systemStatus");
     status.classList.toggle("offline", !online);
     status.innerHTML = `<i></i> ${online ? "System online" : "Connection lost"}`;
+    if (lastConnectionState !== online) {
+        appendLog(online ? "Live system monitoring connected." : "System monitor connection lost.", online ? "success" : "error");
+        lastConnectionState = online;
+    }
+}
+
+function updateResourceHealth(data) {
+    const conditions = [
+        ["CPU", Number(data.cpu) >= 85, `${Number(data.cpu).toFixed(0)}%`],
+        ["Memory", Number(data.memory) >= 90, `${Number(data.memory).toFixed(0)}%`],
+        ["Disk", Number(data.disk) >= 90, `${Number(data.disk).toFixed(0)}%`]
+    ];
+    conditions.forEach(([name, warning, reading]) => {
+        const wasActive = activeResourceAlerts.has(name);
+        if (warning && !wasActive) appendLog(`High ${name.toLowerCase()} usage detected (${reading}).`, "warning");
+        if (!warning && wasActive) appendLog(`${name} usage returned to normal.`, "success");
+        if (warning) activeResourceAlerts.add(name);
+        else activeResourceAlerts.delete(name);
+    });
+    const indicator = $("resourceHealth");
+    const hasAlerts = activeResourceAlerts.size > 0;
+    indicator.classList.toggle("warning", hasAlerts);
+    indicator.innerHTML = `<i></i> ${hasAlerts ? `High ${[...activeResourceAlerts].join(" · ")} usage` : "Resources healthy"}`;
 }
 
 async function loadStats() {
     try {
         const data = await fetchJSON("/api/stats");
+        updateResourceHealth(data);
         const cpu = Number(data.cpu);
         const memory = Number(data.memory);
         $("cpu").textContent = Number.isFinite(cpu) ? cpu.toFixed(1) : "--";
@@ -47,13 +100,34 @@ async function loadStats() {
             `${data.used_memory} GB used of ${data.total_memory} GB`;
         $("processCount").textContent = Number(data.processes).toLocaleString();
         $("uptime").textContent = formatUptime(Number(data.uptime));
+        $("coreCount").textContent = Number(data.cores).toLocaleString();
+        $("threadCount").textContent = Number(data.threads).toLocaleString();
+        $("runningCount").textContent = Number(data.running).toLocaleString();
+        $("diskUsage").textContent = `${Number(data.disk).toFixed(1)}%`;
+        $("diskDetail").textContent = `${data.disk_used} GB of ${data.disk_total} GB`;
+        $("swapUsage").textContent = `${Number(data.swap).toFixed(1)}%`;
+        $("networkTotals").textContent = `${formatBytes(data.network_recv)} / ${formatBytes(data.network_sent)}`;
         $("lastUpdated").textContent = `Updated ${new Date().toLocaleTimeString([], {
             hour: "2-digit",
             minute: "2-digit",
             second: "2-digit"
         })}`;
-        resourceHistory.push({ cpu: cpu || 0, memory: memory || 0 });
+        const sampledAt = Date.now();
+        const previous = resourceHistory[resourceHistory.length - 1];
+        const elapsed = previous ? Math.max(0.001, (sampledAt - previous.time) / 1000) : 1;
+        const diskReadRate = previous && Number.isFinite(Number(data.disk_read))
+            ? Math.max(0, (Number(data.disk_read) - previous.diskRead) / elapsed) : 0;
+        const diskWriteRate = previous && Number.isFinite(Number(data.disk_write))
+            ? Math.max(0, (Number(data.disk_write) - previous.diskWrite) / elapsed) : 0;
+        resourceHistory.push({
+            time: sampledAt, cpu: cpu || 0, memory: memory || 0,
+            uptime: Number(data.uptime) || 0,
+            processes: Number(data.processes) || 0,
+            diskRead: Number(data.disk_read) || 0, diskWrite: Number(data.disk_write) || 0,
+            diskRate: diskReadRate + diskWriteRate
+        });
         if (resourceHistory.length > 30) resourceHistory.shift();
+        drawMetricSparklines();
         drawResourceChart();
         setSystemStatus(true);
     } catch (error) {
@@ -61,6 +135,21 @@ async function loadStats() {
         $("cpuDetail").textContent = "Unable to reach the system monitor";
         setSystemStatus(false);
     }
+}
+
+function drawMetricSparklines() {
+    const sparks = [["cpuSpark", "cpu"], ["memorySpark", "memory"], ["processSpark", "processes"], ["uptimeSpark", "uptime"]];
+    sparks.forEach(([id, key]) => {
+        const path = $(id);
+        if (!path || !resourceHistory.length) return;
+        const values = resourceHistory.map(point => key === "uptime" ? point.uptime / 60 : point[key]);
+        const min = Math.min(...values), max = Math.max(...values), range = max - min || 1;
+        const coords = values.map((value, index) => ({
+            x: values.length === 1 ? 90 : index / (values.length - 1) * 180,
+            y: 26 - (value - min) / range * 20
+        }));
+        path.setAttribute("d", coords.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "));
+    });
 }
 
 function drawResourceChart() {
@@ -76,56 +165,98 @@ function drawResourceChart() {
 
     const width = bounds.width;
     const height = bounds.height;
-    const left = 32;
-    const right = width - 8;
-    const top = 9;
-    const bottom = height - 19;
+    const left = 48;
+    const right = width - 10;
+    const top = 16;
+    const bottom = height - 26;
     context.clearRect(0, 0, width, height);
     $("chartEmpty").classList.toggle("hidden", resourceHistory.length > 0);
+    const chartConfig = {
+        cpu: { key: "cpu", title: "CPU utilization", color: "#289bff", unit: "%", max: 100 },
+        memory: { key: "memory", title: "Memory usage", color: "#16d996", unit: "%", max: 100 },
+        processes: { key: "processes", title: "Active processes", color: "#ae70ff", unit: "", max: null },
+        disk: { key: "diskRate", title: "Disk I/O throughput", color: "#ffb642", unit: " MB/s", max: null }
+    }[selectedChart];
+    $("chartTitle").textContent = chartConfig.title;
+    $("resourceChart").setAttribute("aria-label", `Live ${chartConfig.title.toLowerCase()} over the last minute`);
+    let values = resourceHistory.map(point => selectedChart === "disk" ? point.diskRate / (1024 * 1024) : point[chartConfig.key]);
+    const maxValue = chartConfig.max || Math.max(selectedChart === "disk" ? 1 : 4, ...values) * 1.15;
+    const axisMax = chartConfig.max || Math.max(1, Math.ceil(maxValue));
+    $("chartCurrent").textContent = values.length
+        ? `${chartConfig.title}: ${selectedChart === "disk" ? `${values[values.length - 1].toFixed(2)} MB/s` : `${values[values.length - 1].toFixed(selectedChart === "processes" ? 0 : 1)}${chartConfig.unit}`}`
+        : "Waiting for readings";
 
-    context.font = "9px DM Sans, Segoe UI, sans-serif";
+    context.font = "10px DM Sans, Segoe UI, sans-serif";
     context.textAlign = "right";
     context.textBaseline = "middle";
-    [0, 50, 100].forEach(value => {
-        const y = bottom - (value / 100) * (bottom - top);
+    const divisions = 4;
+    for (let index = 0; index <= divisions; index += 1) {
+        const value = axisMax * (1 - index / divisions);
+        const y = top + (index / divisions) * (bottom - top);
         context.beginPath();
-        context.strokeStyle = "#1d2a3a";
+        context.strokeStyle = "#303a65";
         context.lineWidth = 1;
         context.moveTo(left, y);
         context.lineTo(right, y);
         context.stroke();
-        context.fillStyle = "#6f7e93";
-        context.fillText(`${value}%`, left - 7, y);
-    });
+        context.fillStyle = "#9aa6cf";
+        const label = chartConfig.unit === "%" ? `${Math.round(value)}%`
+            : selectedChart === "disk" ? `${value.toFixed(1)}` : `${Math.round(value)}`;
+        context.fillText(label, left - 9, y);
+    }
 
     if (!resourceHistory.length) return;
+    const points = values.map((value, index) => ({
+        x: values.length === 1 ? (left + right) / 2 : left + index / (values.length - 1) * (right - left),
+        y: bottom - Math.max(0, Math.min(axisMax, value)) / axisMax * (bottom - top)
+    }));
+    const gradient = context.createLinearGradient(0, top, 0, bottom);
+    gradient.addColorStop(0, `${chartConfig.color}66`);
+    gradient.addColorStop(1, `${chartConfig.color}03`);
+    context.beginPath();
+    context.moveTo(points[0].x, bottom);
+    points.forEach(point => context.lineTo(point.x, point.y));
+    context.lineTo(points[points.length - 1].x, bottom);
+    context.closePath();
+    context.fillStyle = gradient;
+    context.fill();
 
-    const series = [
-        { key: "cpu", color: "#70e1c0" },
-        { key: "memory", color: "#79a8ff" }
-    ];
-    series.forEach(({ key, color }) => {
-        context.beginPath();
-        resourceHistory.forEach((point, index) => {
-            const x = resourceHistory.length === 1
-                ? (left + right) / 2
-                : left + (index / (resourceHistory.length - 1)) * (right - left);
-            const y = bottom - (Math.max(0, Math.min(100, point[key])) / 100) * (bottom - top);
-            if (index === 0) context.moveTo(x, y);
-            else context.lineTo(x, y);
-        });
-        context.strokeStyle = color;
-        context.lineWidth = 2;
-        context.lineJoin = "round";
-        context.lineCap = "round";
-        context.stroke();
-        if (resourceHistory.length === 1) {
-            context.beginPath();
-            context.arc((left + right) / 2, bottom - (resourceHistory[0][key] / 100) * (bottom - top), 3, 0, Math.PI * 2);
-            context.fillStyle = color;
-            context.fill();
-        }
+    context.beginPath();
+    points.forEach((point, index) => {
+        if (index === 0) context.moveTo(point.x, point.y);
+        else context.lineTo(point.x, point.y);
     });
+    context.strokeStyle = chartConfig.color;
+    context.lineWidth = 2.5;
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    context.shadowColor = `${chartConfig.color}80`;
+    context.shadowBlur = 8;
+    context.stroke();
+    context.shadowBlur = 0;
+    const markerStep = Math.max(1, Math.floor(points.length / 12));
+    points.forEach((point, index) => {
+        if (index % markerStep !== 0 && index !== points.length - 1) return;
+        context.beginPath();
+        context.arc(point.x, point.y, index === points.length - 1 ? 3.5 : 2.5, 0, Math.PI * 2);
+        context.fillStyle = chartConfig.color;
+        context.fill();
+        context.strokeStyle = "#f2f5ff";
+        context.lineWidth = 1;
+        context.stroke();
+    });
+
+    context.textAlign = "center";
+    context.textBaseline = "top";
+    context.fillStyle = "#8592b7";
+    const ticks = Math.min(6, resourceHistory.length);
+    for (let index = 0; index < ticks; index += 1) {
+        const pointIndex = ticks === 1 ? resourceHistory.length - 1 : Math.round(index / (ticks - 1) * (resourceHistory.length - 1));
+        const point = resourceHistory[pointIndex];
+        const x = points[pointIndex].x;
+        context.beginPath(); context.moveTo(x, top); context.lineTo(x, bottom); context.strokeStyle = "#ffffff0b"; context.stroke();
+        context.fillText(new Date(point.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), x, bottom + 7);
+    }
 }
 
 function renderProcesses() {
@@ -136,11 +267,11 @@ function renderProcesses() {
         .sort((a, b) => {
             if (sort === "name") return a.name.localeCompare(b.name);
             if (sort === "pid") return a.pid - b.pid;
-            return b.memory - a.memory;
+            return b[sort] - a[sort];
         });
     const tbody = $("processTable");
     if (!processes.length) {
-        tbody.innerHTML = `<tr><td colspan="4" class="table-message">${
+        tbody.innerHTML = `<tr><td colspan="6" class="table-message">${
             currentProcesses.length ? "No processes match your search." : "No processes found."
         }</td></tr>`;
         $("processSummary").textContent = currentProcesses.length
@@ -153,10 +284,13 @@ function renderProcesses() {
         const name = escapeHTML(process.name);
         const status = String(process.status || "unknown").toLowerCase();
         const memory = Math.max(0, Math.min(100, Number(process.memory) || 0));
+        const cpu = Math.max(0, Math.min(100, Number(process.cpu) || 0));
         return `<tr>
             <td><span class="process-name-cell"><span class="process-avatar">${escapeHTML(process.name.charAt(0) || "?")}</span>${name}</span></td>
             <td>${Number(process.pid)}</td>
+            <td class="memory-cell"><span class="memory-reading"><span>${cpu.toFixed(1)}%</span><span class="memory-track cpu-track"><i style="width:${cpu}%"></i></span></span></td>
             <td class="memory-cell"><span class="memory-reading"><span>${memory.toFixed(2)}%</span><span class="memory-track"><i style="width:${memory}%"></i></span></span></td>
+            <td>${Number(process.threads) || 0}</td>
             <td><span class="status-tag ${escapeHTML(status)}">${escapeHTML(status)}</span></td>
         </tr>`;
     }).join("");
@@ -170,7 +304,7 @@ async function loadProcesses() {
         renderProcesses();
     } catch (error) {
         console.error("Could not load processes:", error);
-        tbody.innerHTML = "<tr><td colspan='4' class='table-message'>Unable to load processes. Check the system monitor.</td></tr>";
+        tbody.innerHTML = "<tr><td colspan='6' class='table-message'>Unable to load processes. Check the system monitor.</td></tr>";
         $("processSummary").textContent = "Process data unavailable";
     }
 }
@@ -317,6 +451,167 @@ function exportResultsCSV() {
     URL.revokeObjectURL(url);
 }
 
+function exportProcessesCSV() {
+    const columns = ["pid", "name", "cpu", "memory", "threads", "status", "user"];
+    const cell = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const csv = [columns.join(","), ...currentProcesses.map(process => columns.map(key => cell(process[key])).join(","))].join("\r\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a"); link.href = url; link.download = "os-resource-processes.csv"; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function scheduleMonitor() {
+    window.clearInterval(monitorTimer);
+    if (!monitorPaused) monitorTimer = window.setInterval(() => { loadStats(); loadProcesses(); }, Number($("refreshRate").value));
+}
+
+const viewLabels = {
+    dashboard: "Dashboard", processes: "Process Manager", resources: "Resource Monitor",
+    cpu: "CPU Scheduling", memory: "Memory Manager", disk: "Disk Scheduling",
+    deadlock: "Deadlock & Safety", starvation: "Starvation Prevention", system: "System Info"
+};
+const viewDescriptions = {
+    processes: "Inspect live CPU, memory, thread count, and process state.",
+    resources: "Follow CPU, memory, process, and disk activity over time.",
+    cpu: "Model CPU scheduling policies and compare turnaround and response times.",
+    starvation: "Explore aging and fairness for processes waiting on CPU time.",
+    system: "Review live host resource and operating system telemetry."
+};
+
+function switchView(view) {
+    if (!viewLabels[view]) return;
+    const visiblePages = {
+        dashboard: ["dashboard", "resources", "processes"],
+        processes: ["processes"], resources: ["resources"],
+        cpu: ["cpu"], memory: ["memory"], disk: ["disk"],
+        deadlock: ["deadlock"], starvation: ["starvation"], system: ["system"]
+    }[view];
+    document.querySelectorAll("[data-view-page]").forEach(element => {
+        element.hidden = !visiblePages.includes(element.dataset.viewPage);
+    });
+    const overview = document.querySelector('[data-view-container="overview"]');
+    const operations = document.querySelector('[data-view-container="operations"]');
+    overview.hidden = !["dashboard", "resources", "processes"].includes(view);
+    operations.hidden = !["cpu", "starvation"].includes(view);
+    const telemetry = document.querySelector(".advanced-telemetry");
+    telemetry.open = view === "system";
+    document.querySelectorAll(".nav-link[data-view]").forEach(link => {
+        link.classList.toggle("active", link.dataset.view === view);
+        if (link.dataset.view === view) link.setAttribute("aria-current", "page");
+        else link.removeAttribute("aria-current");
+    });
+    $("breadcrumbCurrent").textContent = viewLabels[view].toLocaleUpperCase();
+    const moduleHeading = $("moduleHeading");
+    const hasGenericHeading = ["processes", "resources", "cpu", "starvation", "system"].includes(view);
+    moduleHeading.hidden = !hasGenericHeading;
+    if (hasGenericHeading) {
+        $("moduleTitle").textContent = viewLabels[view];
+        $("moduleDescription").textContent = viewDescriptions[view];
+    }
+    document.body.dataset.activeView = view;
+    if (view === "dashboard" || view === "resources") drawResourceChart();
+}
+
+function parseIntegerList(value, label, maximum = 100) {
+    const parts = value.split(",").map(part => part.trim());
+    if (!parts.length || parts.length > maximum || parts.some(part => !/^\d+$/.test(part))) {
+        throw new Error(`${label} must be a comma separated list of up to ${maximum} whole numbers.`);
+    }
+    return parts.map(Number);
+}
+
+function parseMatrix(text, label) {
+    let matrix;
+    try { matrix = JSON.parse(text); } catch { throw new Error(`${label} must be valid JSON.`); }
+    if (!Array.isArray(matrix)) throw new Error(`${label} must be a JSON matrix.`);
+    return matrix;
+}
+
+async function runMemoryPolicy(algorithm, pages, frames) {
+    return fetchJSON("/api/memory/simulate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ algorithm, pages, frames })
+    });
+}
+
+function renderMemoryResult(data) {
+    const frameHeaders = Array.from({ length: data.frame_count }, (_, index) => `<th>FRAME ${index + 1}</th>`).join("");
+    const rows = data.states.map((state, index) => `<tr class="${state.fault ? "fault-row" : "hit-row"}"><td>${index + 1}</td><td>${escapeHTML(state.page)}</td>${Array.from({ length: data.frame_count }, (_, frame) => `<td>${escapeHTML(state.frames[frame] ?? "–")}</td>`).join("")}<td><span class="result-badge ${state.fault ? "fault-badge" : "hit-badge"}">${state.fault ? "FAULT" : "HIT"}</span></td></tr>`).join("");
+    $("memoryResult").innerHTML = `<div class="module-result-head"><strong>${escapeHTML(data.algorithm)} page replacement</strong><span>${data.faults} page faults · ${data.hits} hits · ${data.fault_rate}% fault rate</span></div><div class="table-wrap"><table class="module-data-table"><thead><tr><th>STEP</th><th>PAGE</th>${frameHeaders}<th>RESULT</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+async function submitMemory(compare = false) {
+    let pages, frames;
+    try {
+        pages = parseIntegerList($("pageReferences").value, "Page reference string");
+        frames = Number($("memoryFrames").value);
+        if (!Number.isInteger(frames) || frames < 1 || frames > 16) throw new Error("Frame count must be between 1 and 16.");
+    } catch (error) { $("memoryResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; return; }
+    const algorithms = compare ? ["FIFO", "LRU", "Optimal"] : [$("memoryAlgorithm").value];
+    try {
+        const results = await Promise.all(algorithms.map(algorithm => runMemoryPolicy(algorithm, pages, frames)));
+        if (!compare) renderMemoryResult(results[0]);
+        else {
+            const best = Math.min(...results.map(item => item.faults));
+            $("memoryResult").innerHTML = `<div class="module-result-head"><strong>Page replacement comparison</strong><span>${pages.length} references · ${frames} frames</span></div><div class="table-wrap"><table class="module-data-table"><thead><tr><th>POLICY</th><th>HITS</th><th>FAULTS</th><th>FAULT RATE</th></tr></thead><tbody>${results.map(item => `<tr class="${item.faults === best ? "best-row" : ""}"><td>${item.algorithm}${item.faults === best ? " · Best" : ""}</td><td>${item.hits}</td><td>${item.faults}</td><td>${item.fault_rate}%</td></tr>`).join("")}</tbody></table></div>`;
+        }
+        appendLog(`Memory simulation completed${compare ? " for all page policies" : ` with ${algorithms[0]}`}.`, "success");
+    } catch (error) { $("memoryResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; }
+}
+
+async function runDiskPolicy(algorithm, requests, head, maxCylinder, direction) {
+    return fetchJSON("/api/disk/simulate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ algorithm, requests, head, max_cylinder: maxCylinder, direction })
+    });
+}
+
+function renderDiskResult(data, maxCylinder) {
+    const last = Math.max(1, data.path.length - 1);
+    const points = data.path.map((cylinder, index) => `${10 + cylinder / maxCylinder * 980},${12 + index / last * 136}`).join(" ");
+    const nodes = data.path.map((cylinder, index) => {
+        const x = 10 + cylinder / maxCylinder * 980, y = 12 + index / last * 136;
+        return `<circle cx="${x}" cy="${y}" r="5"><title>Step ${index}: cylinder ${cylinder}</title></circle>`;
+    }).join("");
+    $("diskResult").innerHTML = `<div class="module-result-head"><strong>${escapeHTML(data.algorithm)} seek path</strong><span>${data.total_seek} total seeks · ${data.average_seek} average</span></div><svg class="disk-plot" viewBox="0 0 1000 160" role="img" aria-label="Disk head movement path"><line x1="10" y1="150" x2="990" y2="150"></line><polyline points="${points}"></polyline>${nodes}</svg><div class="disk-scale"><span>0</span><span>${Math.round(maxCylinder / 2)}</span><span>${maxCylinder}</span></div><p class="sequence-line"><strong>Head order:</strong> ${data.path.map(value => `<span>${value}</span>`).join(" → ")}</p>`;
+}
+
+async function submitDisk(compare = false) {
+    let requests, head, maxCylinder, direction;
+    try {
+        requests = parseIntegerList($("diskRequests").value, "Cylinder requests");
+        head = Number($("diskHead").value); maxCylinder = Number($("maxCylinder").value); direction = $("diskDirection").value;
+        if (!Number.isInteger(head) || !Number.isInteger(maxCylinder) || maxCylinder < 1 || maxCylinder > 100000 || head < 0 || head > maxCylinder) throw new Error("Set a valid head and maximum cylinder between 1 and 100,000.");
+        if (requests.some(request => request > maxCylinder)) throw new Error("A request exceeds the configured maximum cylinder.");
+    } catch (error) { $("diskResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; return; }
+    const algorithms = compare ? ["FCFS", "SSTF", "SCAN", "C-SCAN", "LOOK", "C-LOOK"] : [$("diskAlgorithm").value];
+    try {
+        const results = await Promise.all(algorithms.map(algorithm => runDiskPolicy(algorithm, requests, head, maxCylinder, direction)));
+        if (!compare) renderDiskResult(results[0], maxCylinder);
+        else {
+            const best = Math.min(...results.map(item => item.total_seek));
+            $("diskResult").innerHTML = `<div class="module-result-head"><strong>Disk scheduling comparison</strong><span>${requests.length} requests · head at ${head}</span></div><div class="table-wrap"><table class="module-data-table"><thead><tr><th>ALGORITHM</th><th>TOTAL SEEK</th><th>AVERAGE SEEK</th><th>ORDER</th></tr></thead><tbody>${results.map(item => `<tr class="${item.total_seek === best ? "best-row" : ""}"><td>${item.algorithm}${item.total_seek === best ? " · Best" : ""}</td><td>${item.total_seek}</td><td>${item.average_seek}</td><td>${item.order.join(" → ")}</td></tr>`).join("")}</tbody></table></div>`;
+        }
+        appendLog(`Disk simulation completed${compare ? " for all seek policies" : ` with ${algorithms[0]}`}.`, "success");
+    } catch (error) { $("diskResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; }
+}
+
+async function submitBanker() {
+    let allocation, maximum, available;
+    try {
+        allocation = parseMatrix($("bankerAllocation").value, "Allocation matrix");
+        maximum = parseMatrix($("bankerMaximum").value, "Maximum matrix");
+        available = JSON.parse($("bankerAvailable").value);
+        if (!Array.isArray(available)) throw new Error("Available resources must be a JSON array.");
+    } catch (error) { $("bankerResult").innerHTML = `<p class="module-error">${escapeHTML(error.message || "Available resources must be valid JSON.")}</p>`; return; }
+    try {
+        const data = await fetchJSON("/api/deadlock/banker", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ allocation, maximum, available }) });
+        const sequence = data.safe ? data.sequence.join(" → ") : `No safe sequence. Waiting processes: ${data.remaining.join(", ")}`;
+        $("bankerResult").innerHTML = `<div class="safety-result ${data.safe ? "safe" : "unsafe"}"><span class="safety-mark">${data.safe ? "✓" : "!"}</span><div><strong>${data.safe ? "Safe state" : "Unsafe state"}</strong><p>${escapeHTML(sequence)}</p></div></div><div class="table-wrap"><table class="module-data-table"><thead><tr><th>PROCESS</th>${available.map((_, index) => `<th>NEED R${index + 1}</th>`).join("")}</tr></thead><tbody>${data.need.map((row, index) => `<tr><td>P${index}</td>${row.map(value => `<td>${value}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+        appendLog(`Banker's algorithm reports an ${data.safe ? "available safe state" : "unsafe resource state"}.`, data.safe ? "success" : "warning");
+    } catch (error) { $("bankerResult").innerHTML = `<p class="module-error">${escapeHTML(error.message)}</p>`; }
+}
+
 function renderSimulation(data) {
     const completion = data.timeline.reduce((max, entry) => Math.max(max, entry.start + entry.duration), 0);
     const rows = data.results.map(result => `<tr>
@@ -365,10 +660,12 @@ async function runSimulation() {
         return;
     }
     buttons.forEach(button => { button.disabled = true; });
+    appendLog(`Started ${algorithm} scheduling simulation.`, "info");
     $("simulationResult").innerHTML = "<p class='table-message'>Running the selected scheduling algorithm…</p>";
     try {
         const data = await requestSimulation(algorithm, jobs, quantum);
         renderSimulation(data);
+        appendLog(`${algorithm} simulation completed for ${jobs.length} processes.`, "success");
     } catch (error) {
         console.error("Simulation failed:", error);
         $("simulationResult").innerHTML = `<p class="table-message">Simulation failed: ${escapeHTML(error.message)}</p>`;
@@ -378,7 +675,7 @@ async function runSimulation() {
 }
 
 async function compareSimulations() {
-    const algorithms = ["FCFS", "SJF", "SRTF", "Priority", "Priority Preemptive", "Aging", "Round Robin"];
+    const algorithms = ["FCFS", "SJF", "SRTF", "LJF", "HRRN", "Priority", "Priority Preemptive", "Aging", "Round Robin"];
     const quantum = Number($("quantum").value);
     if (!Number.isInteger(quantum) || quantum < 1 || quantum > 10000) {
         $("simulationResult").innerHTML = "<p class='table-message'>Enter a time quantum between 1 and 10,000 ms.</p>";
@@ -394,7 +691,8 @@ async function compareSimulations() {
     }
     const buttons = [$("runSimulation"), $("compareSimulation")];
     buttons.forEach(button => { button.disabled = true; });
-    $("simulationResult").innerHTML = "<p class='table-message'>Comparing seven scheduling strategies…</p>";
+    appendLog("Comparing all nine scheduling algorithms.", "info");
+    $("simulationResult").innerHTML = "<p class='table-message'>Comparing nine scheduling strategies…</p>";
     try {
         const comparisons = await Promise.all(algorithms.map(async algorithm => ({
             algorithm,
@@ -407,7 +705,8 @@ async function compareSimulations() {
             return `<tr class="${isBest ? "best-row" : ""}"><td>${escapeHTML(label)}${isBest ? " · Best wait" : ""}</td><td>${formatNumber(item.data.average_waiting)}</td><td>${formatNumber(item.data.average_turnaround)}</td><td>${formatNumber(item.data.average_response)}</td><td>${formatNumber(item.data.cpu_utilization)}%</td></tr>`;
         }).join("");
         lastSimulationResults = null;
-        $("simulationResult").innerHTML = `<div class="result-header"><div><h3>Algorithm comparison</h3><p>Same ${jobs.length}-process workload. Lower wait is better.</p></div><span class="result-badge">7 algorithms</span></div>
+        appendLog("Scheduling comparison completed.", "success");
+    $("simulationResult").innerHTML = `<div class="result-header"><div><h3>Algorithm comparison</h3><p>Same ${jobs.length}-process workload. Lower wait is better.</p></div><span class="result-badge">9 algorithms</span></div>
             <div class="table-wrap"><table class="comparison-table"><thead><tr><th>ALGORITHM</th><th>AVG. WAITING</th><th>AVG. TURNAROUND</th><th>AVG. RESPONSE</th><th>CPU UTILIZATION</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     } catch (error) {
         console.error("Algorithm comparison failed:", error);
@@ -417,10 +716,24 @@ async function compareSimulations() {
     }
 }
 
-document.querySelectorAll(".nav-link").forEach(link => {
-    link.addEventListener("click", () => {
-        document.querySelectorAll(".nav-link").forEach(item => item.classList.remove("active"));
-        link.classList.add("active");
+document.querySelectorAll(".nav-link[data-view]").forEach(link => {
+    link.addEventListener("click", event => { event.preventDefault(); switchView(link.dataset.view); });
+});
+$("runMemory").addEventListener("click", () => submitMemory(false));
+$("compareMemory").addEventListener("click", () => submitMemory(true));
+$("runDisk").addEventListener("click", () => submitDisk(false));
+$("compareDisk").addEventListener("click", () => submitDisk(true));
+$("runBanker").addEventListener("click", submitBanker);
+document.querySelector(".aging-link").addEventListener("click", event => { event.preventDefault(); switchView("cpu"); $("algorithm").value = "Aging"; });
+document.querySelectorAll(".chart-tab").forEach(button => {
+    button.addEventListener("click", () => {
+        selectedChart = button.dataset.chart;
+        document.querySelectorAll(".chart-tab").forEach(tab => {
+            const active = tab === button;
+            tab.classList.toggle("active", active);
+            tab.setAttribute("aria-pressed", String(active));
+        });
+        drawResourceChart();
     });
 });
 $("processSearch").addEventListener("input", renderProcesses);
@@ -429,6 +742,15 @@ $("refreshButton").addEventListener("click", () => {
     loadStats();
     loadProcesses();
 });
+$("exportProcesses").addEventListener("click", exportProcessesCSV);
+$("refreshRate").addEventListener("change", scheduleMonitor);
+$("pauseMonitor").addEventListener("click", () => {
+    monitorPaused = !monitorPaused;
+    $("pauseMonitor").textContent = monitorPaused ? "Resume live updates" : "Pause live updates";
+    appendLog(monitorPaused ? "Live monitor paused." : "Live monitor resumed.", monitorPaused ? "warning" : "success");
+    scheduleMonitor();
+});
+$("clearLog").addEventListener("click", () => { $("systemLog").replaceChildren(); appendLog("Activity log cleared.", "info"); });
 $("runSimulation").addEventListener("click", runSimulation);
 $("compareSimulation").addEventListener("click", compareSimulations);
 $("addProcess").addEventListener("click", addProcess);
@@ -480,5 +802,5 @@ if (restoredWorkload) {
 }
 loadStats();
 loadProcesses();
-window.setInterval(loadStats, 2000);
-window.setInterval(loadProcesses, 10000);
+scheduleMonitor();
+switchView("dashboard");

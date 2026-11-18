@@ -2,9 +2,11 @@
 from flask import Flask, render_template, jsonify, request
 import psutil
 import time
+import os
 
 app = Flask(__name__)
 start_time = time.time()
+CPU_COUNT = psutil.cpu_count() or 1
 AGING_INTERVAL = 2
 MAX_PROCESSES = 12
 MAX_TOTAL_BURST = 500
@@ -117,6 +119,14 @@ def schedule_jobs(jobs, algorithm, quantum):
 
             if algorithm in {"SJF", "SRTF"}:
                 index = min(ready, key=lambda i: (remaining[i], jobs[i]["arrival"], i))
+            elif algorithm == "LJF":
+                index = min(ready, key=lambda i: (-remaining[i], jobs[i]["arrival"], i))
+            elif algorithm == "HRRN":
+                def response_ratio(i):
+                    executed = jobs[i]["burst"] - remaining[i]
+                    waiting = clock - jobs[i]["arrival"] - executed
+                    return -((waiting + remaining[i]) / remaining[i])
+                index = min(ready, key=lambda i: (response_ratio(i), jobs[i]["arrival"], i))
             elif algorithm in {"Priority", "Priority Preemptive"}:
                 index = min(ready, key=lambda i: (jobs[i]["priority"], jobs[i]["arrival"], i))
             elif algorithm == "Aging":
@@ -164,6 +174,123 @@ def schedule_jobs(jobs, algorithm, quantum):
     }
 
 
+def simulate_memory(pages, frame_count, algorithm):
+    frames = []
+    states = []
+    hits = 0
+    last_used = {}
+    fifo_position = 0
+    for position, page in enumerate(pages):
+        fault = page not in frames
+        if not fault:
+            hits += 1
+        elif len(frames) < frame_count:
+            frames.append(page)
+        elif algorithm == "FIFO":
+            frames[fifo_position] = page
+            fifo_position = (fifo_position + 1) % frame_count
+        elif algorithm == "LRU":
+            victim = min(frames, key=lambda item: last_used.get(item, -1))
+            frames[frames.index(victim)] = page
+        else:
+            next_use = {}
+            for resident in frames:
+                try:
+                    next_use[resident] = pages.index(resident, position + 1)
+                except ValueError:
+                    next_use[resident] = float("inf")
+            victim = max(frames, key=lambda item: next_use[item])
+            frames[frames.index(victim)] = page
+        last_used[page] = position
+        states.append({"page": page, "frames": frames.copy(), "fault": fault})
+    faults = len(pages) - hits
+    return {
+        "algorithm": algorithm,
+        "states": states,
+        "hits": hits,
+        "faults": faults,
+        "fault_rate": round(faults / len(pages) * 100, 2),
+        "frame_count": frame_count
+    }
+
+
+def simulate_disk(requests, head, max_cylinder, algorithm, direction):
+    left = sorted((request for request in requests if request < head), reverse=True)
+    right = sorted(request for request in requests if request >= head)
+    if algorithm == "FCFS":
+        order = requests.copy()
+    elif algorithm == "SSTF":
+        remaining = requests.copy()
+        position = head
+        order = []
+        while remaining:
+            selected = min(range(len(remaining)), key=lambda i: (abs(remaining[i] - position), i))
+            position = remaining.pop(selected)
+            order.append(position)
+    elif algorithm in {"SCAN", "C-SCAN", "LOOK", "C-LOOK"}:
+        outward = left if direction == "left" else right
+        inward = right if direction == "left" else left
+        order = outward.copy()
+        if algorithm == "SCAN":
+            order.append(0 if direction == "left" else max_cylinder)
+        elif algorithm == "C-SCAN":
+            order.extend([0 if direction == "left" else max_cylinder,
+                          max_cylinder if direction == "left" else 0])
+            order.extend(reversed(inward))
+        elif algorithm == "C-LOOK" and inward:
+            order.append(inward[-1])
+            order.extend(inward[-2::-1])
+        else:
+            order.extend(inward)
+    else:
+        raise ValueError("Choose a supported disk scheduling algorithm.")
+
+    path = [head]
+    for cylinder in order:
+        if not path or cylinder != path[-1]:
+            path.append(cylinder)
+    movements = [abs(path[i] - path[i - 1]) for i in range(1, len(path))]
+    total_seek = sum(movements)
+    return {
+        "algorithm": algorithm,
+        "head": head,
+        "path": path,
+        "order": order,
+        "movements": movements,
+        "total_seek": total_seek,
+        "average_seek": round(total_seek / len(requests), 2) if requests else 0,
+        "request_count": len(requests)
+    }
+
+
+def bankers_safety(allocation, maximum, available):
+    process_count = len(allocation)
+    resource_count = len(available)
+    if not process_count or len(maximum) != process_count:
+        raise ValueError("Allocation and maximum matrices must have the same non-zero number of processes.")
+    for matrix in (allocation, maximum):
+        if any(len(row) != resource_count for row in matrix):
+            raise ValueError("Every matrix row must match the available resource count.")
+    if any(maximum[p][r] < allocation[p][r] for p in range(process_count) for r in range(resource_count)):
+        raise ValueError("A process allocation cannot exceed its declared maximum.")
+
+    need = [[maximum[p][r] - allocation[p][r] for r in range(resource_count)] for p in range(process_count)]
+    work = available.copy()
+    finished = [False] * process_count
+    sequence = []
+    while len(sequence) < process_count:
+        selected = next((p for p in range(process_count) if not finished[p] and
+                         all(need[p][r] <= work[r] for r in range(resource_count))), None)
+        if selected is None:
+            break
+        for resource in range(resource_count):
+            work[resource] += allocation[selected][resource]
+        finished[selected] = True
+        sequence.append(f"P{selected}")
+    return {"safe": len(sequence) == process_count, "sequence": sequence, "need": need,
+            "remaining": [f"P{p}" for p, done in enumerate(finished) if not done]}
+
+
 @app.route("/")
 def dashboard():
     return render_template("index.html", aging_interval=AGING_INTERVAL)
@@ -173,6 +300,18 @@ def dashboard():
 def stats():
     memory = psutil.virtual_memory()
     boot_time = psutil.boot_time()
+    disk = psutil.disk_usage(os.path.abspath(os.sep))
+    swap = psutil.swap_memory()
+    net = psutil.net_io_counters()
+    disk_io = psutil.disk_io_counters()
+    running = 0
+    thread_count = 0
+    for process in psutil.process_iter(["status", "num_threads"]):
+        try:
+            running += process.info["status"] == psutil.STATUS_RUNNING
+            thread_count += process.info["num_threads"] or 0
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
 
     return jsonify({
         "cpu": psutil.cpu_percent(interval=0.2),
@@ -180,7 +319,18 @@ def stats():
         "total_memory": round(memory.total / (1024 ** 3), 2),
         "used_memory": round(memory.used / (1024 ** 3), 2),
         "processes": len(psutil.pids()),
-        "uptime": int(time.time() - boot_time)
+        "running": running,
+        "uptime": int(time.time() - boot_time),
+        "cores": CPU_COUNT,
+        "threads": thread_count,
+        "disk": disk.percent,
+        "disk_used": round(disk.used / (1024 ** 3), 1),
+        "disk_total": round(disk.total / (1024 ** 3), 1),
+        "swap": swap.percent,
+        "network_sent": net.bytes_sent,
+        "network_recv": net.bytes_recv,
+        "disk_read": disk_io.read_bytes if disk_io else 0,
+        "disk_write": disk_io.write_bytes if disk_io else 0
     })
 
 
@@ -188,21 +338,24 @@ def stats():
 def processes():
     result = []
 
-    for process in psutil.process_iter(
-        ["pid", "name", "memory_percent", "status"]
-    ):
+    for process in psutil.process_iter(["pid", "name", "memory_percent", "status", "num_threads", "username", "cpu_percent"]):
         try:
             item = process.info
             result.append({
                 "pid": item["pid"],
                 "name": item["name"] or "Unknown",
                 "memory": round(item["memory_percent"] or 0, 2),
+                # psutil reports process CPU as a percentage of one core; normalize
+                # it to the same total-machine scale used by system CPU utilization.
+                "cpu": round(min(100, (item["cpu_percent"] or 0) / CPU_COUNT), 2),
+                "threads": item["num_threads"] or 0,
+                "user": item["username"] or "Unknown",
                 "status": item["status"] or "Unknown"
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
-    return jsonify(sorted(result, key=lambda p: p["memory"], reverse=True)[:10])
+    return jsonify(sorted(result, key=lambda p: p["cpu"], reverse=True))
 
 
 @app.route("/api/simulate", methods=["POST"])
@@ -213,7 +366,7 @@ def simulate():
 
     algorithm = data.get("algorithm", "Round Robin")
     if not isinstance(algorithm, str) or algorithm not in {
-        "FCFS", "SJF", "SRTF", "Priority", "Priority Preemptive",
+        "FCFS", "SJF", "SRTF", "LJF", "HRRN", "Priority", "Priority Preemptive",
         "Aging", "Round Robin"
     }:
         return jsonify({"error": "Choose a supported scheduling algorithm."}), 400
@@ -234,6 +387,69 @@ def simulate():
         return jsonify({"error": str(error)}), 400
 
     return jsonify(schedule_jobs(jobs, algorithm, quantum))
+
+
+@app.route("/api/memory/simulate", methods=["POST"])
+def memory_simulate():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected a JSON object."}), 400
+    pages = data.get("pages")
+    algorithm = data.get("algorithm")
+    frames = data.get("frames")
+    if algorithm not in {"FIFO", "LRU", "Optimal"}:
+        return jsonify({"error": "Choose FIFO, LRU, or Optimal page replacement."}), 400
+    if not isinstance(pages, list) or not 1 <= len(pages) <= 100:
+        return jsonify({"error": "Enter between 1 and 100 page references."}), 400
+    if any(isinstance(page, bool) or not isinstance(page, (str, int)) or not str(page).strip() or len(str(page)) > 12 for page in pages):
+        return jsonify({"error": "Page references must be short labels or whole numbers."}), 400
+    if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= 16:
+        return jsonify({"error": "Frame count must be between 1 and 16."}), 400
+    return jsonify(simulate_memory([str(page).strip() for page in pages], frames, algorithm))
+
+
+@app.route("/api/disk/simulate", methods=["POST"])
+def disk_simulate():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected a JSON object."}), 400
+    requests_value = data.get("requests")
+    head = data.get("head")
+    max_cylinder = data.get("max_cylinder", 199)
+    algorithm = data.get("algorithm")
+    direction = data.get("direction", "right")
+    if algorithm not in {"FCFS", "SSTF", "SCAN", "C-SCAN", "LOOK", "C-LOOK"}:
+        return jsonify({"error": "Choose a supported disk scheduling algorithm."}), 400
+    if direction not in {"left", "right"}:
+        return jsonify({"error": "Direction must be left or right."}), 400
+    if isinstance(max_cylinder, bool) or not isinstance(max_cylinder, int) or not 1 <= max_cylinder <= 100000:
+        return jsonify({"error": "Maximum cylinder must be between 1 and 100,000."}), 400
+    if isinstance(head, bool) or not isinstance(head, int) or not 0 <= head <= max_cylinder:
+        return jsonify({"error": "Initial head position must be within the cylinder range."}), 400
+    if not isinstance(requests_value, list) or not 1 <= len(requests_value) <= 100:
+        return jsonify({"error": "Enter between 1 and 100 cylinder requests."}), 400
+    if any(isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= max_cylinder for item in requests_value):
+        return jsonify({"error": "Every request must be a cylinder within the configured range."}), 400
+    return jsonify(simulate_disk(requests_value, head, max_cylinder, algorithm, direction))
+
+
+@app.route("/api/deadlock/banker", methods=["POST"])
+def banker_simulate():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected a JSON object."}), 400
+    allocation, maximum, available = data.get("allocation"), data.get("maximum"), data.get("available")
+    if not isinstance(allocation, list) or not 1 <= len(allocation) <= 20 or not isinstance(maximum, list) or not isinstance(available, list) or not 1 <= len(available) <= 12:
+        return jsonify({"error": "Provide allocation and maximum matrices for 1–20 processes and 1–12 resource types."}), 400
+    matrices = [allocation, maximum, [available]]
+    if any(not isinstance(matrix, list) or any(not isinstance(row, list) or len(row) != len(available) or
+           any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in row) for row in matrix)
+           for matrix in matrices):
+        return jsonify({"error": "Resource matrices must contain non-negative whole numbers with matching columns."}), 400
+    try:
+        return jsonify(bankers_safety(allocation, maximum, available))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
 
 
 if __name__ == "__main__":

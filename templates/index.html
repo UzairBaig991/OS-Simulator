@@ -5,116 +5,135 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#080d19">
     <meta name="description" content="Monitor system resources and explore operating system scheduling algorithms.">
-    <title>Orbit · OS Resource Simulator</title>
+    <title>OS Resource Contention Simulator</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
 <div class="app-shell">
     <aside class="sidebar">
-        <a class="brand" href="#dashboard" aria-label="Orbit dashboard">
-            <span class="brand-mark">O</span>
-            <span><strong>orbit</strong><small>OS RESOURCE LAB</small></span>
+        <a class="brand" href="#dashboard" aria-label="OS Simulator dashboard">
+            <span class="brand-mark">▦</span>
+            <span><strong>OS Simulator</strong><small>RESOURCE CONTROL</small></span>
         </a>
         <p class="nav-label">WORKSPACE</p>
         <nav aria-label="Main navigation">
-            <a class="nav-link active" href="#dashboard"><span class="nav-icon">⌂</span> Overview</a>
-            <a class="nav-link" href="#resources"><span class="nav-icon">◉</span> Resources</a>
-            <a class="nav-link" href="#processes"><span class="nav-icon">▤</span> Processes</a>
-            <a class="nav-link" href="#scheduler"><span class="nav-icon">↗</span> Scheduler lab</a>
-            <a class="nav-link" href="#starvation"><span class="nav-icon">✳</span> Starvation guard</a>
+            <a class="nav-link active" href="#dashboard" data-view="dashboard"><span class="nav-icon">⌂</span> Dashboard</a>
+            <a class="nav-link" href="#processes" data-view="processes"><span class="nav-icon">⚙</span> Process Manager</a>
+            <a class="nav-link" href="#resources" data-view="resources"><span class="nav-icon">▥</span> Resource Monitor</a>
+            <a class="nav-link" href="#scheduler" data-view="cpu"><span class="nav-icon">▱</span> CPU Scheduling</a>
+            <a class="nav-link" href="#memory-manager" data-view="memory"><span class="nav-icon">▦</span> Memory Manager</a>
+            <a class="nav-link" href="#disk-manager" data-view="disk"><span class="nav-icon">◉</span> Disk Scheduling</a>
+            <a class="nav-link" href="#deadlock-manager" data-view="deadlock"><span class="nav-icon">⬡</span> Deadlock & Safety</a>
+            <a class="nav-link" href="#starvation" data-view="starvation"><span class="nav-icon">⬟</span> Starvation Prevention</a>
+            <a class="nav-link" href="#system-info" data-view="system"><span class="nav-icon">ⓘ</span> System Info</a>
         </nav>
         <div class="sidebar-note">
             <span class="status-pulse"></span>
             <div><strong>Local monitor</strong><small>Connected to this machine</small></div>
         </div>
-        <p class="sidebar-footer">A clearer view of your system.</p>
+        <p class="sidebar-footer">Simulate · Monitor · Optimize</p>
     </aside>
 
     <main id="dashboard" class="main-content">
         <header class="topbar">
-            <div class="breadcrumb">WORKSPACE <span>/</span> OVERVIEW</div>
+            <div class="breadcrumb">OS WORKSPACE <span>/</span> <b id="breadcrumbCurrent">DASHBOARD</b></div>
             <div class="topbar-right">
                 <span id="lastUpdated" class="last-updated">Waiting for first reading</span>
                 <span id="systemStatus" class="system-status"><i></i> Connecting</span>
             </div>
         </header>
 
-        <section class="page-heading">
+        <section class="page-heading" data-view-page="dashboard">
             <div>
-                <p class="eyebrow">SYSTEM OVERVIEW</p>
-                <h1>Your system, <span>in focus.</span></h1>
-                <p class="intro">A live view of resource usage, active processes, and scheduling behavior.</p>
+                <p class="eyebrow">LIVE SYSTEM MONITOR</p>
+                <h1>OS <span>Simulator</span></h1>
+                <p class="intro">Monitor resources · Manage processes · Explore scheduling</p>
             </div>
             <button id="refreshButton" class="button button-secondary" type="button">
                 <span aria-hidden="true">↻</span> Refresh data
             </button>
         </section>
+        <section class="module-heading" id="moduleHeading" hidden><p class="eyebrow">OS MODULE</p><h1 id="moduleTitle">Process Manager</h1><p id="moduleDescription"></p></section>
 
-        <section class="metrics" aria-label="System summary">
+        <section class="metrics" aria-label="System summary" data-view-page="dashboard">
             <article class="metric-card metric-cpu">
                 <div class="metric-top"><span class="metric-label">CPU utilization</span><span class="metric-icon">⌁</span></div>
                 <div class="metric-value"><strong id="cpu">--</strong><span>%</span></div>
+                <svg class="metric-spark spark-cpu" viewBox="0 0 180 30" preserveAspectRatio="none" aria-hidden="true"><path id="cpuSpark"></path></svg>
                 <div class="meter"><span id="cpuBar"></span></div>
                 <p id="cpuDetail" class="metric-caption">Live processor load</p>
             </article>
             <article class="metric-card metric-memory">
                 <div class="metric-top"><span class="metric-label">Memory usage</span><span class="metric-icon">▦</span></div>
                 <div class="metric-value"><strong id="memory">--</strong><span>%</span></div>
+                <svg class="metric-spark spark-memory" viewBox="0 0 180 30" preserveAspectRatio="none" aria-hidden="true"><path id="memorySpark"></path></svg>
                 <div class="meter"><span id="memoryBar"></span></div>
                 <p id="memoryDetail" class="metric-caption">Waiting for memory data</p>
             </article>
             <article class="metric-card metric-process">
                 <div class="metric-top"><span class="metric-label">Active processes</span><span class="metric-icon">▤</span></div>
                 <div class="metric-value"><strong id="processCount">--</strong></div>
+                <svg class="metric-spark spark-process" viewBox="0 0 180 30" preserveAspectRatio="none" aria-hidden="true"><path id="processSpark"></path></svg>
                 <div class="metric-inline"><span class="live-dot"></span> Running on this system</div>
                 <p class="metric-caption">Process count from the OS</p>
             </article>
             <article class="metric-card metric-uptime">
                 <div class="metric-top"><span class="metric-label">System uptime</span><span class="metric-icon">◷</span></div>
                 <div class="metric-value"><strong id="uptime">--</strong></div>
+                <svg class="metric-spark spark-uptime" viewBox="0 0 180 30" preserveAspectRatio="none" aria-hidden="true"><path id="uptimeSpark"></path></svg>
                 <div class="metric-inline">Since the last system boot</div>
                 <p class="metric-caption">Updated with each reading</p>
             </article>
         </section>
 
-        <section class="panel chart-panel" id="resources">
+        <div class="overview-grid" data-view-container="overview">
+        <section class="panel chart-panel" id="resources" data-view-page="resources">
             <div class="section-heading">
-                <div><p class="eyebrow">LIVE TELEMETRY</p><h2>Resource activity</h2></div>
-                <div class="chart-legend"><span><i class="legend-cpu"></i> CPU</span><span><i class="legend-memory"></i> Memory</span><span class="chart-window">Last minute</span></div>
+                <div><p class="eyebrow">LIVE TELEMETRY</p><h2 id="chartTitle">CPU utilization</h2></div>
+                <div class="chart-controls" role="group" aria-label="Choose resource graph">
+                    <button class="chart-tab active" type="button" data-chart="cpu" aria-pressed="true">CPU</button>
+                    <button class="chart-tab" type="button" data-chart="memory" aria-pressed="false">Memory</button>
+                    <button class="chart-tab" type="button" data-chart="processes" aria-pressed="false">Processes</button>
+                    <button class="chart-tab" type="button" data-chart="disk" aria-pressed="false">Disk I/O</button>
+                </div>
             </div>
             <div class="chart-wrap">
-                <canvas id="resourceChart" aria-label="CPU and memory utilization over the last minute" role="img"></canvas>
+                <canvas id="resourceChart" aria-label="Live CPU utilization over the last minute" role="img"></canvas>
                 <div id="chartEmpty" class="chart-empty">Collecting resource readings…</div>
             </div>
+            <div class="chart-footer"><span id="chartCurrent">Waiting for readings</span><span id="resourceHealth" class="health-indicator"><i></i> Resources healthy</span><span>Rolling 60 seconds · updates live</span></div>
         </section>
 
-        <section class="panel process-panel" id="processes">
+        <section class="panel process-panel" id="processes" data-view-page="processes">
             <div class="section-heading process-heading">
-                <div><p class="eyebrow">PROCESS MANAGER</p><h2>Top memory consumers</h2><p class="section-description">The 10 processes using the most memory right now.</p></div>
+                <div><p class="eyebrow">PROCESS MANAGER</p><h2>Live processes</h2><p class="section-description">Per process CPU and memory usage, refreshed from the operating system.</p></div>
                 <div class="process-tools">
                     <label class="search-box"><span aria-hidden="true">⌕</span><input id="processSearch" type="search" placeholder="Find a process" aria-label="Find a process"></label>
                     <label class="select-label" for="processSort">Sort
                         <select id="processSort" aria-label="Sort processes">
-                            <option value="memory">Memory</option><option value="name">Name</option><option value="pid">PID</option>
+                            <option value="cpu">CPU</option><option value="memory">Memory</option><option value="name">Name</option><option value="pid">PID</option>
                         </select>
                     </label>
+                    <button id="exportProcesses" class="button button-secondary" type="button">Export CSV</button>
                 </div>
             </div>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th scope="col">PROCESS</th><th scope="col">PID</th><th scope="col">MEMORY</th><th scope="col">STATUS</th></tr></thead>
-                    <tbody id="processTable"><tr><td colspan="4" class="table-message">Loading processes…</td></tr></tbody>
+                    <thead><tr><th scope="col">PROCESS</th><th scope="col">PID</th><th scope="col">CPU</th><th scope="col">MEMORY</th><th scope="col">THREADS</th><th scope="col">STATUS</th></tr></thead>
+                    <tbody id="processTable"><tr><td colspan="6" class="table-message">Loading processes…</td></tr></tbody>
                 </table>
             </div>
-            <div class="table-footer"><span id="processSummary">Refreshing automatically</span><span>Auto-refresh · 10 sec</span></div>
+            <div class="table-footer"><span id="processSummary">Refreshing automatically</span><div class="live-controls"><label>Refresh <select id="refreshRate" aria-label="Refresh interval"><option value="2000" selected>2 sec</option><option value="5000">5 sec</option><option value="10000">10 sec</option></select></label><button id="pauseMonitor" class="text-button" type="button">Pause live updates</button></div></div>
         </section>
+        </div>
 
-        <section class="panel scheduler-panel" id="scheduler">
+        <div class="operations-grid" data-view-container="operations">
+        <section class="panel scheduler-panel" id="scheduler" data-view-page="cpu">
             <div class="section-heading">
                 <div><p class="eyebrow">INTERACTIVE WORKBENCH</p><h2>Scheduling simulator</h2><p class="section-description">Build your own workload and compare how CPU scheduling strategies handle it.</p></div>
                 <span class="lab-badge" id="workloadBadge">4 PROCESSES</span>
             </div>
-            <details class="workload-editor" open>
+            <details class="workload-editor">
                 <summary>
                     <span><strong>Workload designer</strong><small>Set arrival, CPU burst, and priority for each process.</small></span>
                     <span class="editor-hint">MAX 12 PROCESSES <i></i></span>
@@ -141,6 +160,8 @@
                         <option value="FCFS">First come, first served</option>
                         <option value="SJF">Shortest job first · non-preemptive</option>
                         <option value="SRTF">Shortest remaining time · preemptive</option>
+                        <option value="LJF">Longest job first</option>
+                        <option value="HRRN">Highest response ratio next</option>
                         <option value="Priority">Priority scheduling · non-preemptive</option>
                         <option value="Priority Preemptive">Priority scheduling · preemptive</option>
                         <option value="Aging">Priority with aging</option>
@@ -160,7 +181,12 @@
             </div>
         </section>
 
-        <section class="panel aging-panel" id="starvation">
+        <section class="panel system-log-panel" data-view-page="cpu" aria-labelledby="systemLogTitle">
+            <div class="section-heading"><div><p class="eyebrow">LIVE ACTIVITY</p><h2 id="systemLogTitle">System log</h2></div><button id="clearLog" class="text-button" type="button">Clear log</button></div>
+            <div id="systemLog" class="system-log" role="log" aria-live="polite"><p><i></i><span>Monitor starting…</span><time>now</time></p></div>
+        </section>
+
+        <section class="panel aging-panel" id="starvation" data-view-page="starvation">
             <div class="aging-symbol">✳</div>
             <div class="aging-copy">
                 <p class="eyebrow">FAIRNESS MECHANISM</p>
@@ -170,8 +196,72 @@
             </div>
             <a class="button button-secondary aging-link" href="#scheduler">Try priority with aging <span aria-hidden="true">↗</span></a>
         </section>
+        </div>
 
-        <footer><span class="footer-brand">orbit</span> OS Resource Simulator <span>·</span> Monitor thoughtfully.</footer>
+        <section class="module-page" id="memory-manager" data-view-page="memory" hidden>
+            <div class="module-heading"><p class="eyebrow">VIRTUAL MEMORY</p><h1>Memory Manager</h1><p>Compare page replacement policies and inspect every frame after each reference.</p></div>
+            <section class="panel module-panel">
+                <div class="module-form-grid">
+                    <label class="module-field module-wide">Page reference string
+                        <input id="pageReferences" value="7, 0, 1, 2, 0, 3, 0, 4, 2, 3, 0, 3, 2" autocomplete="off">
+                    </label>
+                    <label class="module-field">Frames
+                        <input id="memoryFrames" type="number" min="1" max="16" value="3">
+                    </label>
+                    <label class="module-field">Replacement policy
+                        <select id="memoryAlgorithm"><option>FIFO</option><option>LRU</option><option>Optimal</option></select>
+                    </label>
+                    <div class="module-actions"><button id="runMemory" class="button button-primary" type="button">Run memory simulation</button><button id="compareMemory" class="button button-secondary" type="button">Compare policies</button></div>
+                </div>
+                <p class="workload-help">Enter comma separated page labels. FIFO uses arrival order, LRU uses recent use, and Optimal replaces the page needed farthest in the future.</p>
+                <div id="memoryResult" class="module-result" aria-live="polite"><p class="table-message">Choose a policy and simulate a page-reference string.</p></div>
+            </section>
+        </section>
+
+        <section class="module-page" id="disk-manager" data-view-page="disk" hidden>
+            <div class="module-heading"><p class="eyebrow">STORAGE I/O</p><h1>Disk Scheduling</h1><p>Compare head movement and total seek distance across disk request strategies.</p></div>
+            <section class="panel module-panel">
+                <div class="module-form-grid disk-form-grid">
+                    <label class="module-field module-wide">Cylinder requests
+                        <input id="diskRequests" value="98, 183, 37, 122, 14, 124, 65, 67" autocomplete="off">
+                    </label>
+                    <label class="module-field">Initial head<input id="diskHead" type="number" min="0" max="100000" value="53"></label>
+                    <label class="module-field">Last cylinder<input id="maxCylinder" type="number" min="1" max="100000" value="199"></label>
+                    <label class="module-field">Direction<select id="diskDirection"><option value="right">Towards higher cylinders</option><option value="left">Towards lower cylinders</option></select></label>
+                    <label class="module-field">Algorithm<select id="diskAlgorithm"><option>FCFS</option><option>SSTF</option><option>SCAN</option><option>C-SCAN</option><option>LOOK</option><option>C-LOOK</option></select></label>
+                    <div class="module-actions"><button id="runDisk" class="button button-primary" type="button">Run disk simulation</button><button id="compareDisk" class="button button-secondary" type="button">Compare algorithms</button></div>
+                </div>
+                <div id="diskResult" class="module-result" aria-live="polite"><p class="table-message">Enter requests and run a disk scheduling algorithm.</p></div>
+            </section>
+        </section>
+
+        <section class="module-page" id="deadlock-manager" data-view-page="deadlock" hidden>
+            <div class="module-heading"><p class="eyebrow">DEADLOCK AVOIDANCE</p><h1>Banker’s Safety Check</h1><p>Check whether the current allocation has a safe execution sequence.</p></div>
+            <section class="panel module-panel">
+                <div class="banker-fields">
+                    <label class="module-field">Allocation matrix<textarea id="bankerAllocation" rows="5" spellcheck="false">[[0,1,0],[2,0,0],[3,0,2],[2,1,1],[0,0,2]]</textarea></label>
+                    <label class="module-field">Maximum demand<textarea id="bankerMaximum" rows="5" spellcheck="false">[[7,5,3],[3,2,2],[9,0,2],[2,2,2],[4,3,3]]</textarea></label>
+                    <label class="module-field">Available resources<textarea id="bankerAvailable" rows="2" spellcheck="false">[3,3,2]</textarea></label>
+                </div>
+                <p class="workload-help">Each matrix row represents a process and each column represents one resource type. Values must be non-negative whole numbers.</p>
+                <button id="runBanker" class="button button-primary" type="button">Check safe state</button>
+                <div id="bankerResult" class="module-result" aria-live="polite"><p class="table-message">Run the safety check to find a safe sequence.</p></div>
+            </section>
+        </section>
+
+        <details class="advanced-telemetry" data-view-page="system">
+            <summary>Additional system telemetry <span>CPU cores · threads · disk · swap · network</span></summary>
+            <section class="system-details" aria-label="Additional system resources">
+                <div><span>Logical CPUs</span><strong id="coreCount">--</strong></div>
+                <div><span>Threads</span><strong id="threadCount">--</strong></div>
+                <div><span>Running now</span><strong id="runningCount">--</strong></div>
+                <div><span>Disk used</span><strong id="diskUsage">--</strong><small id="diskDetail">System volume</small></div>
+                <div><span>Swap used</span><strong id="swapUsage">--</strong><small>Virtual memory</small></div>
+                <div><span>Network totals</span><strong id="networkTotals">--</strong><small>Received · sent</small></div>
+            </section>
+        </details>
+
+        <footer><span class="footer-brand">OS</span> Resource Contention Simulator <span>·</span> Monitor · Simulate · Prevent Starvation</footer>
     </main>
 </div>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
